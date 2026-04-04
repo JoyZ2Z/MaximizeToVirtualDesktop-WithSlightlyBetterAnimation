@@ -24,8 +24,7 @@ internal sealed class WindowMonitor : IDisposable
     private readonly NativeMethods.WinEventProc _destroyProc;
     private readonly NativeMethods.WinEventProc _moveSizeEndProc;
     private IntPtr _moveSizeEndHook;
-    // Track windows that have been maximized but need to wait for resize end
-    private readonly HashSet<IntPtr> _pendingMaximize = new();
+    // (Pending maximize handling removed; using direct delayed task)
 
     public WindowMonitor(FullScreenManager manager, FullScreenTracker tracker, Control syncControl)
     {
@@ -92,10 +91,16 @@ internal sealed class WindowMonitor : IDisposable
         if (!NativeMethods.GetWindowPlacement(hwnd, ref newPlacement)) return;
         if (newPlacement.showCmd == NativeMethods.SW_MAXIMIZE)
         {
-            // Defer maximization until after the resize operation completes
-            if (_pendingMaximize.Add(hwnd))
+            // Directly handle maximize via shortcut with a short delay to allow any resize to settle
+            if (!_tracker.IsTracked(hwnd))
             {
-                Trace.WriteLine($"WindowMonitor: Queued maximize for window {hwnd} after resize end.");
+                Trace.WriteLine($"WindowMonitor: Detected maximize shortcut for window {hwnd}, scheduling move to virtual desktop.");
+                // Schedule async task to delay briefly then invoke MaximizeToDesktop
+                Task.Run(async () =>
+                {
+                    await Task.Delay(150); // allow system to finalize maximize state
+                    MarshalToUiThread(() => _manager.MaximizeToDesktop(hwnd));
+                });
             }
         }
     }
@@ -105,14 +110,6 @@ internal sealed class WindowMonitor : IDisposable
     {
         // Only care about top-level window changes (OBJID_WINDOW)
         if (idObject != NativeMethods.OBJID_WINDOW || idChild != 0) return;
-
-        // If this window was pending maximize, handle it now
-        if (_pendingMaximize.Remove(hwnd))
-        {
-            Trace.WriteLine($"WindowMonitor: MoveSizeEnd triggered for pending maximize window {hwnd}.");
-            MarshalToUiThread(() => _manager.MaximizeToDesktop(hwnd));
-            return;
-        }
 
         // Handle only tracked windows that are being restored (not maximized)
         if (!_tracker.IsTracked(hwnd)) return;
