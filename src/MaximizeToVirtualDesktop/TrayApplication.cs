@@ -230,7 +230,14 @@ internal sealed class TrayApplication : Form
         }
 
         Trace.WriteLine($"TrayApplication: Hotkey pressed, toggling window {hwnd}");
-        _manager.Toggle(hwnd);
+        if (_settings.AlwaysMaximizeToVirtualDesktopsOnClick && !_settings.InvertShiftClick)
+        {
+            _manager.Toggle(hwnd);
+        }
+        else
+        {
+            Trace.WriteLine("TrayApplication: Maximize shortcut disabled by settings.");
+        }
     }
 
     private void OnPinHotkeyPressed()
