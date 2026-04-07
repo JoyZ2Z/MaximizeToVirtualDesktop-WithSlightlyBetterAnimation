@@ -48,7 +48,7 @@ internal sealed class TrayApplication : Form
         _vds = new VirtualDesktopService();
         _tracker = new FullScreenTracker();
         _manager = new FullScreenManager(_vds, _tracker);
-        _monitor = new WindowMonitor(_manager, _tracker, this);
+        _monitor = new WindowMonitor(_manager, _tracker, this, _settings);
         _mouseHook = new MaximizeButtonHook(_manager, this, _settings);
 
         // System tray icon
@@ -230,14 +230,7 @@ internal sealed class TrayApplication : Form
         }
 
         Trace.WriteLine($"TrayApplication: Hotkey pressed, toggling window {hwnd}");
-        if (_settings.AlwaysMaximizeToVirtualDesktopsOnClick && !_settings.InvertShiftClick)
-        {
-            _manager.Toggle(hwnd);
-        }
-        else
-        {
-            Trace.WriteLine("TrayApplication: Maximize shortcut disabled by settings.");
-        }
+        _manager.Toggle(hwnd);
     }
 
     private void OnPinHotkeyPressed()

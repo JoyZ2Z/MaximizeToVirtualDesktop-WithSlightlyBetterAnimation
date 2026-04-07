@@ -14,7 +14,7 @@ internal sealed class WindowMonitor : IDisposable
     private readonly FullScreenManager _manager;
     private readonly FullScreenTracker _tracker;
     private readonly Control _syncControl;
-
+    private readonly AppSettings _settings;
     private IntPtr _locationChangeHook;
     private IntPtr _destroyHook;
     private bool _disposed;
@@ -27,11 +27,12 @@ internal sealed class WindowMonitor : IDisposable
     // Track windows that have been maximized but need to wait for resize end
     private readonly HashSet<IntPtr> _pendingMaximize = new();
 
-    public WindowMonitor(FullScreenManager manager, FullScreenTracker tracker, Control syncControl)
+    public WindowMonitor(FullScreenManager manager, FullScreenTracker tracker, Control syncControl, AppSettings settings)
     {
         _manager = manager;
         _tracker = tracker;
         _syncControl = syncControl;
+        _settings = settings;
 
         _locationChangeProc = OnLocationChange;
         _destroyProc = OnDestroy;
@@ -110,7 +111,9 @@ internal sealed class WindowMonitor : IDisposable
         if (!NativeMethods.GetWindowPlacement(hwnd, ref newPlacement)) return;
         // Log the detected placement for debugging purposes
         Trace.WriteLine($"WindowMonitor: Detected placement.showCmd={newPlacement.showCmd} for hwnd={hwnd}");
-        if (newPlacement.showCmd == NativeMethods.SW_MAXIMIZE)
+        bool shiftHeld = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_SHIFT) & 0x8000) != 0;
+        bool triggerVirtualDesktop = _settings.InvertShiftClick ? !shiftHeld : shiftHeld;
+        if (newPlacement.showCmd == NativeMethods.SW_MAXIMIZE && triggerVirtualDesktop)
         {
             // Defer maximization until after the resize operation completes
             if (_pendingMaximize.Add(hwnd))
