@@ -17,6 +17,7 @@ internal sealed class SettingsDialog : Form
     private readonly ComboBox _cmbPinKey;
 
     private readonly CheckBox _chkInvertShiftClick;
+    private readonly CheckBox _chkAlwaysMaximize;
 
     // (display name, VK code) pairs for the key combo boxes
     private static readonly (string Name, uint Vk)[] SupportedKeys =
@@ -62,15 +63,24 @@ internal sealed class SettingsDialog : Form
         y += grpPin.Height + 12;
 
         // Behavior group
-        var grpBehavior = new GroupBox { Text = "Behavior", Location = new Point(margin, y), Size = new Size(grpW, 80) };
+        var grpBehavior = new GroupBox { Text = "Behavior", Location = new Point(margin, y), Size = new Size(grpW, 100) };
         Controls.Add(grpBehavior);
+        // New checkbox for AlwaysMaximizeToVirtualDesktopsOnClick
+        _chkAlwaysMaximize = new CheckBox
+        {
+            Text = "Always maximize to virtual desktop on click",
+            AutoSize = true,
+            Checked = settings.AlwaysMaximizeToVirtualDesktopsOnClick,
+            Location = new Point(10, 20),
+        };
+        grpBehavior.Controls.Add(_chkAlwaysMaximize);
+        // Existing checkbox for InvertShiftClick
         _chkInvertShiftClick = new CheckBox
         {
-            Text = "Always maximize to virtual desktop on click\r\n" +
-                   "(Shift+Click performs a normal maximize instead)",
+            Text = "Shift+Click performs a normal maximize instead",
             AutoSize = true,
             Checked = settings.InvertShiftClick,
-            Location = new Point(10, 28),
+            Location = new Point(10, 48),
         };
         grpBehavior.Controls.Add(_chkInvertShiftClick);
         y += grpBehavior.Height + 16;
@@ -173,6 +183,7 @@ internal sealed class SettingsDialog : Form
         _chkPinWin.Checked   = false;
         _cmbPinKey.SelectedIndex = Array.FindIndex(SupportedKeys, k => k.Vk == NativeMethods.VK_P);
 
+        _chkAlwaysMaximize.Checked = true;
         _chkInvertShiftClick.Checked = false;
     }
 
@@ -207,6 +218,7 @@ internal sealed class SettingsDialog : Form
         _settings.HotkeyKey          = _cmbHotkeyKey.SelectedIndex >= 0 ? SupportedKeys[_cmbHotkeyKey.SelectedIndex].Vk : NativeMethods.VK_X;
         _settings.PinHotkeyModifiers = BuildModifiers(_chkPinCtrl, _chkPinAlt, _chkPinShift, _chkPinWin);
         _settings.PinHotkeyKey       = _cmbPinKey.SelectedIndex >= 0 ? SupportedKeys[_cmbPinKey.SelectedIndex].Vk : NativeMethods.VK_P;
+        _settings.AlwaysMaximizeToVirtualDesktopsOnClick = _chkAlwaysMaximize.Checked;
         _settings.InvertShiftClick   = _chkInvertShiftClick.Checked;
     }
 
