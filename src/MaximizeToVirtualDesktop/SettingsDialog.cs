@@ -17,6 +17,7 @@ internal sealed class SettingsDialog : Form
     private readonly ComboBox _cmbPinKey;
 
     private readonly CheckBox _chkInvertShiftClick;
+    private Button _btnStartup = null!;
 
     // (display name, VK code) pairs for the key combo boxes
     private static readonly (string Name, uint Vk)[] SupportedKeys =
@@ -73,7 +74,21 @@ internal sealed class SettingsDialog : Form
             Location = new Point(10, 28),
         };
         grpBehavior.Controls.Add(_chkInvertShiftClick);
-        y += grpBehavior.Height + 16;
+        y += grpBehavior.Height + 12;
+
+        // Manage Startup group
+        var grpStartup = new GroupBox { Text = "Manage Startup", Location = new Point(margin, y), Size = new Size(grpW, 70) };
+        Controls.Add(grpStartup);
+        _btnStartup = new Button
+        {
+            Text = StartupManager.IsStartupEnabled() ? "Remove from Startup" : "Add to Startup",
+            Size = new Size(150, 28),
+            Location = new Point(10, 25),
+            FlatStyle = FlatStyle.System,
+        };
+        _btnStartup.Click += (_, _) => ToggleStartup();
+        grpStartup.Controls.Add(_btnStartup);
+        y += grpStartup.Height + 16;
 
         // Buttons — uniform height, Reset Defaults right-aligned
         int btnW = 90;
@@ -174,6 +189,34 @@ internal sealed class SettingsDialog : Form
         _cmbPinKey.SelectedIndex = Array.FindIndex(SupportedKeys, k => k.Vk == NativeMethods.VK_P);
 
         _chkInvertShiftClick.Checked = false;
+    }
+
+    private void ToggleStartup()
+    {
+        if (StartupManager.IsStartupEnabled())
+        {
+            if (StartupManager.DisableStartup())
+            {
+                _btnStartup.Text = "Add to Startup";
+                MessageBox.Show("App removed from startup.", "Startup Disabled", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            else
+            {
+                MessageBox.Show("Failed to remove from startup.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+        else
+        {
+            if (StartupManager.EnableStartup())
+            {
+                _btnStartup.Text = "Remove from Startup";
+                MessageBox.Show("App added to startup.", "Startup Enabled", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            else
+            {
+                MessageBox.Show("Failed to add to startup.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
     }
 
     /// <summary>Returns an error message if the current hotkey configuration is invalid, or null if valid.</summary>

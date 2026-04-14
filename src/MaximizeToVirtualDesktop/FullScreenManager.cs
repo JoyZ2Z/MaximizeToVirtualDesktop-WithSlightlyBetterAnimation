@@ -59,8 +59,7 @@ internal sealed class FullScreenManager
 
     /// <summary>
     /// Send a window to a new virtual desktop, maximized.
-    /// If the window belongs to a multi-window process (e.g., VS Code with detached tabs),
-    /// moves all visible windows from that process together.
+    /// Only the clicked window is moved; other windows from the same process are not affected.
     /// </summary>
     public void MaximizeToDesktop(IntPtr hwnd)
     {
@@ -77,31 +76,8 @@ internal sealed class FullScreenManager
             return;
         }
 
-        // 1. Find all windows to move together
-        // Explorer is a single-process app — all File Explorer windows share one process,
-        // so grouping by process would grab every Explorer window. Just move the targeted one.
-        NativeMethods.GetWindowThreadProcessId(hwnd, out int targetPid);
-        bool isExplorer = false;
-        try
-        {
-            using var proc = Process.GetProcessById(targetPid);
-            isExplorer = proc.ProcessName.Equals("explorer", StringComparison.OrdinalIgnoreCase);
-        }
-        catch { }
-
-        var allWindows = isExplorer
-            ? new List<IntPtr> { hwnd }
-            : GetAllProcessWindows(hwnd);
-
-        if (allWindows.Count == 0)
-        {
-            Trace.WriteLine("FullScreenManager: No valid windows found for process, aborting.");
-            return;
-        }
-
-        // Ensure the original window is first in the list (will be the one we maximize)
-        allWindows.Remove(hwnd);
-        allWindows.Insert(0, hwnd);
+        // 1. Move only the clicked window
+        var allWindows = new List<IntPtr> { hwnd };
 
         // 2. Record original state for all windows
         var originalDesktopId = _vds.GetDesktopIdForWindow(hwnd);
@@ -116,17 +92,6 @@ internal sealed class FullScreenManager
         {
             Trace.WriteLine("FullScreenManager: Could not get window placement, aborting.");
             return;
-        }
-
-        // Store placements for all windows
-        var windowPlacements = new Dictionary<IntPtr, NativeMethods.WINDOWPLACEMENT>();
-        foreach (var window in allWindows)
-        {
-            var placement = NativeMethods.WINDOWPLACEMENT.Default;
-            if (NativeMethods.GetWindowPlacement(window, ref placement))
-            {
-                windowPlacements[window] = placement;
-            }
         }
 
         // 3. Create new virtual desktop
@@ -231,29 +196,16 @@ internal sealed class FullScreenManager
         }
         NativeMethods.SetForegroundWindow(hwnd);
 
-        // 8. Track all windows
-        // Note: All windows share the same tempDesktop COM reference.
-        // When restoring/destroying, we only release the COM reference once per desktop.
-        foreach (var window in movedWindows)
-        {
-            var placement = windowPlacements.ContainsKey(window) 
-                ? windowPlacements[window] 
-                : NativeMethods.WINDOWPLACEMENT.Default;
-            _tracker.Track(window, originalDesktopId.Value, tempDesktopId.Value, tempDesktop, processName, placement);
-        }
+        // 8. Track the window
+        _tracker.Track(hwnd, originalDesktopId.Value, tempDesktopId.Value, tempDesktop, processName, originalPlacement);
 
-        var windowCount = movedWindows.Count;
-        var message = windowCount > 1 
-            ? $"→ Virtual Desktop ({windowCount} windows)" 
-            : "→ Virtual Desktop";
-        NotificationOverlay.ShowNotification(message, processName ?? "", hwnd);
-        Trace.WriteLine($"FullScreenManager: Successfully moved {windowCount} window(s) to desktop {tempDesktopId}");
+        NotificationOverlay.ShowNotification("→ Virtual Desktop", processName ?? "", hwnd);
+        Trace.WriteLine($"FullScreenManager: Successfully moved window to desktop {tempDesktopId}");
     }
 
     /// <summary>
     /// Restore a tracked window: move it back to its original desktop, restore window state,
     /// switch back, and remove the temp desktop.
-    /// If multiple windows share the same temp desktop, restores all of them together.
     /// </summary>
     public void Restore(IntPtr hwnd)
     {
@@ -264,39 +216,25 @@ internal sealed class FullScreenManager
             return;
         }
 
-        // Find all windows on the same temp desktop (may be multiple if from same process)
-        var relatedWindows = _tracker.GetAll()
-            .Where(e => e.TempDesktopId == entry.TempDesktopId)
-            .ToList();
+        Trace.WriteLine($"FullScreenManager: Restoring window {hwnd} from temp desktop {entry.TempDesktopId}");
 
-        Trace.WriteLine($"FullScreenManager: Restoring {relatedWindows.Count} window(s) from temp desktop {entry.TempDesktopId}");
-
-        // Untrack all related windows first to prevent reentrant calls
-        foreach (var relatedEntry in relatedWindows)
-        {
-            _tracker.Untrack(relatedEntry.Hwnd);
-        }
+        // Untrack this window
+        _tracker.Untrack(hwnd);
 
         var origDesktop = _vds.FindDesktop(entry.OriginalDesktopId);
         try
         {
-            // Restore all windows
-            foreach (var relatedEntry in relatedWindows)
+            // Restore window placement
+            if (NativeMethods.IsWindow(hwnd))
             {
-                var windowStillExists = NativeMethods.IsWindow(relatedEntry.Hwnd);
-                
-                // Restore window placement
-                if (windowStillExists)
-                {
-                    var placement = relatedEntry.OriginalPlacement;
-                    NativeMethods.SetWindowPlacement(relatedEntry.Hwnd, ref placement);
-                }
+                var placement = entry.OriginalPlacement;
+                NativeMethods.SetWindowPlacement(hwnd, ref placement);
+            }
 
-                // Move window back to original desktop
-                if (origDesktop != null && windowStillExists)
-                {
-                    _vds.MoveWindowToDesktop(relatedEntry.Hwnd, origDesktop);
-                }
+            // Move window back to original desktop
+            if (origDesktop != null && NativeMethods.IsWindow(hwnd))
+            {
+                _vds.MoveWindowToDesktop(hwnd, origDesktop);
             }
 
             // Switch back to original desktop
@@ -306,7 +244,7 @@ internal sealed class FullScreenManager
             }
             else
             {
-                Trace.WriteLine("FullScreenManager: Original desktop no longer exists, leaving windows on current.");
+                Trace.WriteLine("FullScreenManager: Original desktop no longer exists, leaving window on current.");
             }
         }
         finally
@@ -314,29 +252,25 @@ internal sealed class FullScreenManager
             if (origDesktop != null) Marshal.ReleaseComObject(origDesktop);
         }
 
-        // Remove temp desktop and release its COM reference (only once for all windows)
+        // Remove temp desktop and release its COM reference
         if (_releasedDesktops.Add(entry.TempDesktopId))
         {
             _vds.RemoveDesktop(entry.TempDesktop);
             Marshal.ReleaseComObject(entry.TempDesktop);
         }
 
-        // Set focus on the primary restored window
+        // Set focus on the restored window
         if (NativeMethods.IsWindow(hwnd))
         {
             NativeMethods.SetForegroundWindow(hwnd);
         }
 
-        var windowCount = relatedWindows.Count;
-        var message = windowCount > 1 ? $"← Restored ({windowCount} windows)" : "← Restored";
-        NotificationOverlay.ShowNotification(message, entry.ProcessName ?? "", hwnd);
-        Trace.WriteLine($"FullScreenManager: Restored {windowCount} window(s) to original desktop.");
+        NotificationOverlay.ShowNotification("← Restored", entry.ProcessName ?? "", hwnd);
+        Trace.WriteLine($"FullScreenManager: Restored window to original desktop.");
     }
 
     /// <summary>
     /// Called when a tracked window is destroyed (closed). Clean up its temp desktop.
-    /// If multiple windows share the same temp desktop, only removes the desktop when
-    /// the last window is destroyed.
     /// </summary>
     public void HandleWindowDestroyed(IntPtr hwnd)
     {
@@ -345,19 +279,7 @@ internal sealed class FullScreenManager
 
         Trace.WriteLine($"FullScreenManager: Tracked window {hwnd} destroyed.");
 
-        // Check if other windows are still on the same temp desktop
-        var remainingWindows = _tracker.GetAll()
-            .Where(e => e.TempDesktopId == entry.TempDesktopId)
-            .ToList();
-
-        if (remainingWindows.Count > 0)
-        {
-            Trace.WriteLine($"FullScreenManager: {remainingWindows.Count} window(s) still on temp desktop {entry.TempDesktopId}, not removing desktop yet.");
-            // Don't release the COM reference or remove desktop - other windows still need it
-            return;
-        }
-
-        Trace.WriteLine($"FullScreenManager: Last window on temp desktop {entry.TempDesktopId}, cleaning up.");
+        Trace.WriteLine($"FullScreenManager: Cleaning up temp desktop {entry.TempDesktopId}");
 
         // Switch back to original desktop first
         var origDesktop = _vds.FindDesktop(entry.OriginalDesktopId);
@@ -370,7 +292,7 @@ internal sealed class FullScreenManager
             if (origDesktop != null) Marshal.ReleaseComObject(origDesktop);
         }
 
-        // Remove the temp desktop and release its COM reference (only once, now that it's the last window)
+        // Remove the temp desktop and release its COM reference
         if (_releasedDesktops.Add(entry.TempDesktopId))
         {
             _vds.RemoveDesktop(entry.TempDesktop);
@@ -449,54 +371,4 @@ internal sealed class FullScreenManager
         }
     }
 
-    /// <summary>
-    /// Get all visible windows belonging to the same process as the given window.
-    /// Returns windows that are:
-    /// - Visible
-    /// - Not owned by another window (not dialogs/popups)
-    /// - Belong to the same process
-    /// - Have a window title (filters out background/helper windows)
-    /// 
-    /// This is used to find sibling windows (e.g., VS Code detached tabs) that should
-    /// be moved together to the virtual desktop.
-    /// </summary>
-    private List<IntPtr> GetAllProcessWindows(IntPtr hwnd)
-    {
-        NativeMethods.GetWindowThreadProcessId(hwnd, out int targetPid);
-        var windows = new List<IntPtr>();
-
-        NativeMethods.EnumWindows((enumHwnd, _) =>
-        {
-            // Skip if not visible
-            if (!NativeMethods.IsWindowVisible(enumHwnd))
-                return true;
-
-            // Skip if owned by another window (dialogs, popups)
-            if (NativeMethods.GetWindow(enumHwnd, NativeMethods.GW_OWNER) != IntPtr.Zero)
-                return true;
-
-            // Skip if different process
-            NativeMethods.GetWindowThreadProcessId(enumHwnd, out int enumPid);
-            if (enumPid != targetPid)
-                return true;
-
-            // Skip if no title - this filters out background/helper windows.
-            // Top-level application windows (main windows, detached tabs) have titles.
-            // Note: This may miss windows that are temporarily title-less during initialization,
-            // but that's acceptable for this use case.
-            int textLength = NativeMethods.GetWindowTextLength(enumHwnd);
-            if (textLength == 0)
-                return true;
-
-            // Skip windows already tracked on another virtual desktop
-            if (_tracker.IsTracked(enumHwnd))
-                return true;
-
-            windows.Add(enumHwnd);
-            return true; // Continue enumeration
-        }, IntPtr.Zero);
-
-        Trace.WriteLine($"FullScreenManager: Found {windows.Count} window(s) for process {targetPid}");
-        return windows;
-    }
 }
