@@ -25,6 +25,7 @@ internal sealed class WindowMonitor : IDisposable
     private readonly NativeMethods.WinEventProc _moveSizeEndProc;
     private IntPtr _moveSizeEndHook;
     // Track windows that have been maximized but need to wait for resize end
+    // Access to this set must happen only on the UI thread.
     private readonly HashSet<IntPtr> _pendingMaximize = new();
 
     public WindowMonitor(FullScreenManager manager, FullScreenTracker tracker, Control syncControl, AppSettings settings)
@@ -116,31 +117,38 @@ internal sealed class WindowMonitor : IDisposable
         if (newPlacement.showCmd == NativeMethods.SW_MAXIMIZE && triggerVirtualDesktop)
         {
             // Defer maximization until after the resize operation completes
-            if (_pendingMaximize.Add(hwnd))
+            MarshalToUiThread(() =>
             {
-                Trace.WriteLine($"WindowMonitor: Queued maximize for window {hwnd} after resize end.");
-                // Schedule a fallback in case MoveSizeEnd does not fire (e.g., keyboard shortcut)
-                _ = Task.Run(async () =>
+                if (_pendingMaximize.Add(hwnd))
                 {
-                    await Task.Delay(200);
-                    if (_pendingMaximize.Contains(hwnd))
+                    Trace.WriteLine($"WindowMonitor: Queued maximize for window {hwnd} after resize end.");
+                    // Schedule a fallback in case MoveSizeEnd does not fire (e.g., keyboard shortcut)
+                    _ = Task.Run(async () =>
                     {
-                        _pendingMaximize.Remove(hwnd);
-                        var placement = NativeMethods.WINDOWPLACEMENT.Default;
-                        bool isMaximized = NativeMethods.GetWindowPlacement(hwnd, ref placement) && placement.showCmd == NativeMethods.SW_MAXIMIZE;
-                        if (isMaximized)
+                        await Task.Delay(200);
+                        // Marshal the check/remove back onto the UI thread
+                        MarshalToUiThread(() =>
                         {
-                            Trace.WriteLine($"WindowMonitor: Fallback processing for pending maximize window {hwnd}.");
-                            MarshalToUiThread(() => _manager.MaximizeToDesktop(hwnd));
-                        }
-                        else
-                        {
-                            Trace.WriteLine($"WindowMonitor: Fallback detected restore for pending window {hwnd}.");
-                            MarshalToUiThread(() => _manager.Restore(hwnd));
-                        }
-                    }
-                });
-            }
+                            if (_pendingMaximize.Contains(hwnd))
+                            {
+                                _pendingMaximize.Remove(hwnd);
+                                var placement = NativeMethods.WINDOWPLACEMENT.Default;
+                                bool isMaximized = NativeMethods.GetWindowPlacement(hwnd, ref placement) && placement.showCmd == NativeMethods.SW_MAXIMIZE;
+                                if (isMaximized)
+                                {
+                                    Trace.WriteLine($"WindowMonitor: Fallback processing for pending maximize window {hwnd}.");
+                                    _manager.MaximizeToDesktop(hwnd);
+                                }
+                                else
+                                {
+                                    Trace.WriteLine($"WindowMonitor: Fallback detected restore for pending window {hwnd}.");
+                                    _manager.Restore(hwnd);
+                                }
+                            }
+                        });
+                    });
+                }
+            });
         }
     }
 
@@ -151,7 +159,12 @@ internal sealed class WindowMonitor : IDisposable
         if (idObject != NativeMethods.OBJID_WINDOW || idChild != 0) return;
 
         // If this window was pending maximize, handle it now
-        if (_pendingMaximize.Remove(hwnd))
+        bool wasPending = false;
+        if (!_syncControl.IsDisposed && _syncControl.IsHandleCreated)
+        {
+            wasPending = (bool)_syncControl.Invoke(new Func<bool>(() => _pendingMaximize.Remove(hwnd)));
+        }
+        if (wasPending)
         {
             Trace.WriteLine($"WindowMonitor: MoveSizeEnd triggered for pending maximize window {hwnd}.");
             MarshalToUiThread(() => _manager.MaximizeToDesktop(hwnd));
