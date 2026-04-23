@@ -218,8 +218,7 @@ internal sealed class FullScreenManager
 
         Trace.WriteLine($"FullScreenManager: Restoring window {hwnd} from temp desktop {entry.TempDesktopId}");
 
-        // Untrack this window
-        _tracker.Untrack(hwnd);
+        // Untrack will be performed after successful restore
 
         var origDesktop = _vds.FindDesktop(entry.OriginalDesktopId);
         try
@@ -229,6 +228,8 @@ internal sealed class FullScreenManager
             {
                 var placement = entry.OriginalPlacement;
                 NativeMethods.SetWindowPlacement(hwnd, ref placement);
+                // Ensure the window is shown in its normal (not maximized) state
+                NativeMethods.ShowWindow(hwnd, (int)NativeMethods.SW_SHOWNORMAL);
             }
 
             // Move window back to original desktop
@@ -258,6 +259,8 @@ internal sealed class FullScreenManager
             _vds.RemoveDesktop(entry.TempDesktop);
             Marshal.ReleaseComObject(entry.TempDesktop);
         }
+      
+        _tracker.Untrack(hwnd);
 
         // Set focus on the restored window
         if (NativeMethods.IsWindow(hwnd))

@@ -63,15 +63,15 @@ internal sealed class SettingsDialog : Form
         y += grpPin.Height + 12;
 
         // Behavior group
-        var grpBehavior = new GroupBox { Text = "Behavior", Location = new Point(margin, y), Size = new Size(grpW, 80) };
+        var grpBehavior = new GroupBox { Text = "Behavior", Location = new Point(margin, y), Size = new Size(grpW, 100) };
         Controls.Add(grpBehavior);
+        // Existing checkbox for InvertShiftClick
         _chkInvertShiftClick = new CheckBox
         {
-            Text = "Always maximize to virtual desktop on click\r\n" +
-                   "(Shift+Click performs a normal maximize instead)",
+            Text = "Shift+Click performs a normal maximize instead",
             AutoSize = true,
             Checked = settings.InvertShiftClick,
-            Location = new Point(10, 28),
+            Location = new Point(10, 48),
         };
         grpBehavior.Controls.Add(_chkInvertShiftClick);
         y += grpBehavior.Height + 12;
