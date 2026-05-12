@@ -1,4 +1,5 @@
 using System.Drawing.Drawing2D;
+using System.Diagnostics;
 using Microsoft.Win32;
 using System.Runtime.InteropServices;
 
@@ -205,7 +206,7 @@ internal sealed class NotificationOverlay : Form
         }
         catch
         {
-            // Ignore and use dark theme by default.
+            Trace.WriteLine("NotificationOverlay: Failed to read AppsUseLightTheme; defaulting to dark theme.");
         }
 
         return true;
