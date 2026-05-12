@@ -17,6 +17,7 @@ internal sealed class SettingsDialog : Form
     private readonly ComboBox _cmbPinKey;
 
     private readonly CheckBox _chkInvertShiftClick;
+    private readonly CheckBox _chkShowSwitchPopup;
     private Button _btnStartup = null!;
 
     // (display name, VK code) pairs for the key combo boxes
@@ -63,15 +64,23 @@ internal sealed class SettingsDialog : Form
         y += grpPin.Height + 12;
 
         // Behavior group
-        var grpBehavior = new GroupBox { Text = "Behavior", Location = new Point(margin, y), Size = new Size(grpW, 100) };
+        var grpBehavior = new GroupBox { Text = "Behavior", Location = new Point(margin, y), Size = new Size(grpW, 124) };
         Controls.Add(grpBehavior);
+        _chkShowSwitchPopup = new CheckBox
+        {
+            Text = "Show popup when switching desktops",
+            AutoSize = true,
+            Checked = settings.ShowSwitchPopup,
+            Location = new Point(10, 24),
+        };
+        grpBehavior.Controls.Add(_chkShowSwitchPopup);
         // Existing checkbox for InvertShiftClick
         _chkInvertShiftClick = new CheckBox
         {
             Text = "Shift+Click performs a normal maximize instead",
             AutoSize = true,
             Checked = settings.InvertShiftClick,
-            Location = new Point(10, 48),
+            Location = new Point(10, 54),
         };
         grpBehavior.Controls.Add(_chkInvertShiftClick);
         y += grpBehavior.Height + 12;
@@ -188,6 +197,7 @@ internal sealed class SettingsDialog : Form
         _chkPinWin.Checked   = false;
         _cmbPinKey.SelectedIndex = Array.FindIndex(SupportedKeys, k => k.Vk == NativeMethods.VK_P);
 
+        _chkShowSwitchPopup.Checked = true;
         _chkInvertShiftClick.Checked = false;
     }
 
@@ -250,6 +260,7 @@ internal sealed class SettingsDialog : Form
         _settings.HotkeyKey          = _cmbHotkeyKey.SelectedIndex >= 0 ? SupportedKeys[_cmbHotkeyKey.SelectedIndex].Vk : NativeMethods.VK_X;
         _settings.PinHotkeyModifiers = BuildModifiers(_chkPinCtrl, _chkPinAlt, _chkPinShift, _chkPinWin);
         _settings.PinHotkeyKey       = _cmbPinKey.SelectedIndex >= 0 ? SupportedKeys[_cmbPinKey.SelectedIndex].Vk : NativeMethods.VK_P;
+        _settings.ShowSwitchPopup    = _chkShowSwitchPopup.Checked;
         _settings.InvertShiftClick   = _chkInvertShiftClick.Checked;
     }
 

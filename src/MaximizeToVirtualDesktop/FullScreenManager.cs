@@ -12,15 +12,17 @@ internal sealed class FullScreenManager
 {
     private readonly VirtualDesktopService _vds;
     private readonly FullScreenTracker _tracker;
+    private readonly AppSettings _settings;
     private readonly HashSet<IntPtr> _inFlight = new();
     // Track temp desktop COM refs that have already been released to prevent double-release.
     // Multiple tracked windows may share the same TempDesktop COM pointer.
     private readonly HashSet<Guid> _releasedDesktops = new();
 
-    public FullScreenManager(VirtualDesktopService vds, FullScreenTracker tracker)
+    public FullScreenManager(VirtualDesktopService vds, FullScreenTracker tracker, AppSettings settings)
     {
         _vds = vds;
         _tracker = tracker;
+        _settings = settings;
     }
 
     /// <summary>
@@ -186,8 +188,11 @@ internal sealed class FullScreenManager
         if (elevated)
         {
             Trace.WriteLine("FullScreenManager: Window is elevated, cannot maximize via UIPI.");
-            NotificationOverlay.ShowNotification("⚠ Elevated Window",
-                "Press Win+↑ to maximize", hwnd);
+            if (_settings.ShowSwitchPopup)
+            {
+                NotificationOverlay.ShowNotification("⚠ Elevated Window",
+                    "Press Win+↑ to maximize", hwnd);
+            }
         }
         else
         {
@@ -199,7 +204,10 @@ internal sealed class FullScreenManager
         // 8. Track the window
         _tracker.Track(hwnd, originalDesktopId.Value, tempDesktopId.Value, tempDesktop, processName, originalPlacement);
 
-        NotificationOverlay.ShowNotification("→ Virtual Desktop", processName ?? "", hwnd);
+        if (_settings.ShowSwitchPopup)
+        {
+            NotificationOverlay.ShowNotification("→ Virtual Desktop", processName ?? "", hwnd);
+        }
         Trace.WriteLine($"FullScreenManager: Successfully moved window to desktop {tempDesktopId}");
     }
 
@@ -268,7 +276,10 @@ internal sealed class FullScreenManager
             NativeMethods.SetForegroundWindow(hwnd);
         }
 
-        NotificationOverlay.ShowNotification("← Restored", entry.ProcessName ?? "", hwnd);
+        if (_settings.ShowSwitchPopup)
+        {
+            NotificationOverlay.ShowNotification("← Restored", entry.ProcessName ?? "", hwnd);
+        }
         Trace.WriteLine($"FullScreenManager: Restored window to original desktop.");
     }
 

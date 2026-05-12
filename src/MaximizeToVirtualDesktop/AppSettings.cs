@@ -34,6 +34,11 @@ internal sealed class AppSettings
     /// </summary>
     public bool InvertShiftClick { get; set; } = false;
 
+    /// <summary>
+    /// When true, show on-screen popup notifications when switching windows to/from virtual desktops.
+    /// </summary>
+    public bool ShowSwitchPopup { get; set; } = true;
+
     public static AppSettings Load()
     {
         try
