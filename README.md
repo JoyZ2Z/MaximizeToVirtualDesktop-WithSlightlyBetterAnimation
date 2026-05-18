@@ -16,6 +16,7 @@ When triggered, the foreground window is moved to a brand-new virtual desktop an
 The app runs in the system tray. Right-click the tray icon for options:
 - **Restore All** — brings all windows back and removes temp desktops
 - **How to Use** — shows usage instructions
+- **Settings** — configure hotkeys and whether switch popups are shown
 - **Check for Updates** — checks for new releases on GitHub
 - **Exit** — restores all windows, then exits
 

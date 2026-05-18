@@ -1,11 +1,13 @@
 using System.Drawing.Drawing2D;
+using System.Diagnostics;
+using Microsoft.Win32;
 using System.Runtime.InteropServices;
 
 namespace MaximizeToVirtualDesktop;
 
 /// <summary>
 /// Translucent overlay notification that replaces balloon tips.
-/// Shows centered on the active monitor with Win11 Mica backdrop,
+/// Shows centered on the active monitor,
 /// fades out after 1.5 seconds. Click-through and non-activating.
 /// </summary>
 internal sealed class NotificationOverlay : Form
@@ -20,6 +22,7 @@ internal sealed class NotificationOverlay : Form
 
     private readonly System.Windows.Forms.Timer _hideTimer;
     private readonly System.Windows.Forms.Timer _fadeTimer;
+    private readonly bool _darkTheme;
     private string _title = "";
     private string _subtitle = "";
 
@@ -31,8 +34,9 @@ internal sealed class NotificationOverlay : Form
         ShowInTaskbar = false;
         TopMost = true;
         StartPosition = FormStartPosition.Manual;
-        BackColor = Color.FromArgb(30, 30, 46);
-        ForeColor = Color.White;
+        _darkTheme = IsDarkModeEnabled();
+        BackColor = _darkTheme ? Color.FromArgb(30, 30, 46) : Color.FromArgb(245, 245, 250);
+        ForeColor = _darkTheme ? Color.White : Color.FromArgb(24, 24, 28);
         DoubleBuffered = true;
         Size = new Size(MinWidth, 80);
 
@@ -82,23 +86,14 @@ internal sealed class NotificationOverlay : Form
         int cornerPref = 2; // DWMWCP_ROUND
         DwmSetWindowAttribute(Handle, DWMWA_WINDOW_CORNER_PREFERENCE, ref cornerPref, sizeof(int));
 
-        // Dark mode (affects DWM border and backdrop tint)
-        int darkMode = 1;
+        // Match border rendering to system theme
+        int darkMode = _darkTheme ? 1 : 0;
         DwmSetWindowAttribute(Handle, DWMWA_USE_IMMERSIVE_DARK_MODE, ref darkMode, sizeof(int));
-
-        // Try Mica Alt backdrop — falls back gracefully to solid BackColor
-        int backdropType = 4; // DWMSBT_TABBEDWINDOW (Mica Alt)
-        if (DwmSetWindowAttribute(Handle, DWMWA_SYSTEMBACKDROP_TYPE, ref backdropType, sizeof(int)) == 0)
-        {
-            // Extend frame so backdrop fills client area
-            var margins = new MARGINS(-1);
-            DwmExtendFrameIntoClientArea(Handle, ref margins);
-        }
     }
 
     protected override void OnPaintBackground(PaintEventArgs e)
     {
-        // Dark fill — if Mica is active, DWM composites beneath this
+        // Fill with a solid theme-aware color for consistent rendering across displays.
         using var brush = new SolidBrush(BackColor);
         e.Graphics.FillRectangle(brush, ClientRectangle);
     }
@@ -118,7 +113,7 @@ internal sealed class NotificationOverlay : Form
     {
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
 
         using var titleFont = new Font(FontFamily, 15f, FontStyle.Bold);
         using var subtitleFont = new Font(FontFamily, 10.5f);
@@ -138,13 +133,16 @@ internal sealed class NotificationOverlay : Form
 
         TextRenderer.DrawText(g, _title, titleFont,
             new Rectangle(PaddingH, y, maxTextWidth, titleSize.Height),
-            Color.White, flags);
+            ForeColor, flags);
 
         if (hasSubtitle)
         {
+            var subtitleColor = _darkTheme
+                ? Color.FromArgb(180, 180, 180)
+                : Color.FromArgb(88, 88, 96);
             TextRenderer.DrawText(g, _subtitle, subtitleFont,
                 new Rectangle(PaddingH, y + titleSize.Height + 2, maxTextWidth, subtitleSize.Height),
-                Color.FromArgb(180, 180, 180), flags);
+                subtitleColor, flags);
         }
     }
 
@@ -195,22 +193,30 @@ internal sealed class NotificationOverlay : Form
             screen.WorkingArea.Top + screen.WorkingArea.Height / 4 - Height / 2);
     }
 
+    private static bool IsDarkModeEnabled()
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+            var appsUseLightTheme = key?.GetValue("AppsUseLightTheme");
+            if (appsUseLightTheme is int value)
+            {
+                return value == 0;
+            }
+        }
+        catch
+        {
+            Trace.WriteLine("NotificationOverlay: Failed to read AppsUseLightTheme; defaulting to dark theme.");
+        }
+
+        return true;
+    }
+
     // --- DWM interop (overlay-specific, not shared with NativeMethods) ---
 
     private const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
     private const int DWMWA_WINDOW_CORNER_PREFERENCE = 33;
-    private const int DWMWA_SYSTEMBACKDROP_TYPE = 38;
 
     [DllImport("dwmapi.dll")]
     private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
-
-    [DllImport("dwmapi.dll")]
-    private static extern int DwmExtendFrameIntoClientArea(IntPtr hwnd, ref MARGINS margins);
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct MARGINS
-    {
-        public int Left, Right, Top, Bottom;
-        public MARGINS(int all) => Left = Right = Top = Bottom = all;
-    }
 }
