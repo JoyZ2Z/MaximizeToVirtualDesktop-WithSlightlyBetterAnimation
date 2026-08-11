@@ -121,25 +121,34 @@ internal sealed class FullScreenManager
 
         if (_settings.SwitchMode == DesktopSwitchMode.Smooth)
         {
-            // Smooth: maximize first on current desktop (user sees animation),
-            // then silently move the already-maximized window to the new desktop.
+            // Smooth: animate maximize on current desktop, then pin window to all desktops,
+            // move to new desktop, switch, and unpin. Window is always visible — zero DWM gap.
             if (!elevated && NativeMethods.IsWindow(hwnd))
             {
                 NativeMethods.ShowWindow(hwnd, NativeMethods.SW_MAXIMIZE);
                 Thread.Sleep(300); // wait for animation to finish
             }
 
+            if (!_vds.PinWindow(hwnd))
+            {
+                Trace.WriteLine("FullScreenManager: PinWindow failed, falling back to move+switch.");
+            }
+
             if (!_vds.MoveWindowToDesktop(hwnd, tempDesktop))
             {
+                _vds.UnpinWindow(hwnd);
                 RollbackSwitch(tempDesktop, originalDesktopId.Value, hwnd, originalPlacement, elevated);
                 return;
             }
 
             if (!_vds.SwitchToDesktop(tempDesktop))
             {
+                _vds.UnpinWindow(hwnd);
                 RollbackSwitch(tempDesktop, originalDesktopId.Value, hwnd, originalPlacement, elevated);
                 return;
             }
+
+            _vds.UnpinWindow(hwnd);
         }
         else // Immediate
         {
