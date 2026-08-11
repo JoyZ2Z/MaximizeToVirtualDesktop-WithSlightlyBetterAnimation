@@ -158,21 +158,10 @@ internal sealed class FullScreenManager
             }
         }
 
-        // 6. Restore window to normal size (window is on new desktop, invisible to user),
-        //    then switch desktop instantly, then maximize.
+        // 6. Switch to the new desktop. If window is already maximized (fallback path),
+        //    leave it as-is to avoid a flash of the desktop wallpaper.
+        //    If not maximized (hook/hotkey path), maximize after switching.
         bool elevated = NativeMethods.IsWindowElevated(hwnd);
-
-        if (!elevated && NativeMethods.IsWindow(hwnd))
-        {
-            var current = NativeMethods.WINDOWPLACEMENT.Default;
-            if (NativeMethods.GetWindowPlacement(hwnd, ref current) && current.showCmd == NativeMethods.SW_MAXIMIZE)
-            {
-                // Window was maximized by Windows before we got control (Electron, fallback path).
-                // Restore to normal — invisible since window is already on the new desktop.
-                NativeMethods.ShowWindow(hwnd, (int)NativeMethods.SW_SHOWNORMAL);
-                Trace.WriteLine($"FullScreenManager: Restored maximized window {hwnd} on new desktop.");
-            }
-        }
 
         if (!_vds.SwitchToDesktop(tempDesktop))
         {
@@ -182,7 +171,13 @@ internal sealed class FullScreenManager
 
         if (!elevated && NativeMethods.IsWindow(hwnd))
         {
-            NativeMethods.ShowWindow(hwnd, NativeMethods.SW_MAXIMIZE);
+            var current = NativeMethods.WINDOWPLACEMENT.Default;
+            bool alreadyMaximized = NativeMethods.GetWindowPlacement(hwnd, ref current)
+                && current.showCmd == NativeMethods.SW_MAXIMIZE;
+            if (!alreadyMaximized)
+            {
+                NativeMethods.ShowWindow(hwnd, NativeMethods.SW_MAXIMIZE);
+            }
         }
         NativeMethods.SetForegroundWindow(hwnd);
 
