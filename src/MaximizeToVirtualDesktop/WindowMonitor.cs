@@ -26,8 +26,9 @@ internal sealed class WindowMonitor : IDisposable
     private readonly NativeMethods.WinEventProc _hideProc;
     private readonly NativeMethods.WinEventProc _moveSizeEndProc;
     private IntPtr _moveSizeEndHook;
+    // Debounce restore calls during drag — only execute after events settle for 200ms
+    private CancellationTokenSource? _restoreDebounceCts;
     // Track windows that have been maximized but need to wait for resize end
-    // Access to this set must happen only on the UI thread.
     private readonly HashSet<IntPtr> _pendingMaximize = new();
 
     public WindowMonitor(FullScreenManager manager, FullScreenTracker tracker, Control syncControl, AppSettings settings)
@@ -100,7 +101,25 @@ internal sealed class WindowMonitor : IDisposable
                 if (placement.showCmd != NativeMethods.SW_MAXIMIZE)
                 {
                     bool isMinimized = NativeMethods.IsIconic(hwnd);
-                    MarshalToUiThread(() => _manager.Restore(hwnd, keepMinimized: isMinimized));
+                    if (isMinimized)
+                    {
+                        // Minimize: immediate restore (no drag possible when minimized)
+                        MarshalToUiThread(() => _manager.Restore(hwnd, keepMinimized: true));
+                    }
+                    else
+                    {
+                        // Double-click or drag: debounce — only restore after events settle
+                        _restoreDebounceCts?.Cancel();
+                        _restoreDebounceCts = new CancellationTokenSource();
+                        var token = _restoreDebounceCts.Token;
+                        var capturedHwnd = hwnd;
+                        _ = Task.Run(async () =>
+                        {
+                            try { await Task.Delay(200, token); }
+                            catch (OperationCanceledException) { return; }
+                            MarshalToUiThread(() => _manager.Restore(capturedHwnd));
+                        });
+                    }
                     return;
                 }
             }
@@ -185,7 +204,6 @@ internal sealed class WindowMonitor : IDisposable
         Trace.WriteLine($"WindowMonitor: MoveSizeEnd: tracked window {hwnd} showCmd={placement.showCmd}.");
         if (placement.showCmd != NativeMethods.SW_MAXIMIZE && !NativeMethods.IsIconic(hwnd))
         {
-            if (NativeMethods.GetCapture() == hwnd) return; // still dragging
             Trace.WriteLine($"WindowMonitor: Tracked window {hwnd} un-maximized via move/size, restoring.");
             await Task.Delay(100);
             MarshalToUiThread(() => _manager.Restore(hwnd));
