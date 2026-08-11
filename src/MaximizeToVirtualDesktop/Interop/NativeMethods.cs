@@ -85,13 +85,6 @@ internal static partial class NativeMethods
     [DllImport("user32.dll")]
     internal static extern IntPtr SetFocus(IntPtr hWnd);
 
-    [DllImport("dwmapi.dll")]
-    internal static extern int DwmFlush();
-
-    [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    internal static extern bool LockWindowUpdate(IntPtr hWndLock);
-
     internal const int VK_MENU = 0x12;
     internal const int KEYEVENTF_KEYUP = 0x0002;
 
@@ -241,19 +234,9 @@ internal static partial class NativeMethods
 
     internal const int SM_CXDOUBLECLK = 36;
     internal const int SM_CYDOUBLECLK = 37;
-    internal const int SM_CXSIZE = 30;
-    internal const int SM_CXFRAME = 32;
-    internal const int SM_CYCAPTION = 4;
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct RECT
-    {
-        public int Left, Top, Right, Bottom;
-    }
-
-    [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    internal static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+    internal struct RECT { public int Left, Top, Right, Bottom; }
 
     internal const int WH_MOUSE_LL = 14;
     internal const int HC_ACTION = 0;

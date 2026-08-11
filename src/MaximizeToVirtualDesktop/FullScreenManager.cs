@@ -80,10 +80,7 @@ internal sealed class FullScreenManager
             return;
         }
 
-        // 1. Move only the clicked window
-        var allWindows = new List<IntPtr> { hwnd };
-
-        // 2. Record original state for all windows
+        // 1. Record original state
         var originalDesktopId = _vds.GetDesktopIdForWindow(hwnd);
         if (originalDesktopId == null)
         {
@@ -98,7 +95,7 @@ internal sealed class FullScreenManager
             return;
         }
 
-        // 3. Create new virtual desktop
+        // 2. Create new virtual desktop
         var (tempDesktop, tempDesktopId) = _vds.CreateDesktop();
         if (tempDesktop == null || tempDesktopId == null)
         {
@@ -106,7 +103,7 @@ internal sealed class FullScreenManager
             return;
         }
 
-        // 4. Name the desktop after the window title (or process name as fallback)
+        // 3. Name the desktop
         string? processName = null;
         try
         {
@@ -117,30 +114,14 @@ internal sealed class FullScreenManager
                 : process.ProcessName;
             _vds.SetDesktopName(tempDesktop, $"[MVD] {processName}");
         }
-        catch
-        {
-            // Non-critical, continue
-        }
+        catch { /* Non-critical */ }
 
-        // 5. Move secondary windows to new desktop (no visibility impact).
-        var movedWindows = new List<IntPtr>();
-        foreach (var window in allWindows)
-        {
-            if (window == hwnd) continue;
-            if (_vds.MoveWindowToDesktop(window, tempDesktop))
-                movedWindows.Add(window);
-            else
-                Trace.WriteLine($"FullScreenManager: Skipping secondary window {window} (move failed).");
-        }
-
-        // 6. Switch FIRST (user sees new desktop wallpaper), then restore (invisible
-        //    on old desktop), then move window to new, then maximize with animation.
-        //    One unified code path for hook, double-click, and maximize-button flows.
+        // 4. Switch to new desktop, restore on old (invisible), move window, maximize.
         bool elevated = NativeMethods.IsWindowElevated(hwnd);
 
         if (!_vds.SwitchToDesktop(tempDesktop))
         {
-            RollbackSwitch(tempDesktop, originalDesktopId.Value, movedWindows, hwnd, originalPlacement, elevated);
+            RollbackSwitch(tempDesktop, originalDesktopId.Value, hwnd, originalPlacement, elevated);
             return;
         }
 
@@ -151,19 +132,8 @@ internal sealed class FullScreenManager
 
         if (!_vds.MoveWindowToDesktop(hwnd, tempDesktop))
         {
-            Trace.WriteLine($"FullScreenManager: Failed to move primary window {hwnd}, rolling back.");
-            var origDesktop = _vds.FindDesktop(originalDesktopId.Value);
-            try
-            {
-                if (origDesktop != null)
-                {
-                    foreach (var movedWindow in movedWindows)
-                        _vds.MoveWindowToDesktop(movedWindow, origDesktop);
-                }
-            }
-            finally { if (origDesktop != null) Marshal.ReleaseComObject(origDesktop); }
-            _vds.RemoveDesktop(tempDesktop);
-            Marshal.ReleaseComObject(tempDesktop);
+            Trace.WriteLine($"FullScreenManager: Failed to move window {hwnd}, rolling back.");
+            RollbackSwitch(tempDesktop, originalDesktopId.Value, hwnd, originalPlacement, elevated);
             return;
         }
 
@@ -172,10 +142,9 @@ internal sealed class FullScreenManager
             NativeMethods.ShowWindow(hwnd, NativeMethods.SW_MAXIMIZE);
         }
 
-        // Focus retry with virtual Alt tap
         ScheduleFocusRetry(hwnd, 4);
 
-        // 7. Track the window
+        // 5. Track
         _tracker.Track(hwnd, originalDesktopId.Value, tempDesktopId.Value, tempDesktop, processName, originalPlacement);
 
         if (_settings.ShowSwitchPopup)
@@ -222,31 +191,20 @@ internal sealed class FullScreenManager
     /// Rollback a failed desktop switch: restore window placement, move windows back, remove temp desktop.
     /// </summary>
     private void RollbackSwitch(IVirtualDesktop tempDesktop, Guid originalDesktopId,
-        List<IntPtr> movedWindows, IntPtr hwnd,
-        NativeMethods.WINDOWPLACEMENT originalPlacement, bool elevated)
+        IntPtr hwnd, NativeMethods.WINDOWPLACEMENT originalPlacement, bool elevated)
     {
-        Trace.WriteLine("FullScreenManager: Failed to switch desktop, rolling back.");
+        Trace.WriteLine("FullScreenManager: Failed desktop switch, rolling back.");
         if (!elevated && NativeMethods.IsWindow(hwnd))
         {
-            var rollbackPlacement = originalPlacement;
-            NativeMethods.SetWindowPlacement(hwnd, ref rollbackPlacement);
+            var p = originalPlacement;
+            NativeMethods.SetWindowPlacement(hwnd, ref p);
         }
         var origDesktop = _vds.FindDesktop(originalDesktopId);
         try
         {
-            if (origDesktop != null)
-            {
-                foreach (var window in movedWindows)
-                {
-                    _vds.MoveWindowToDesktop(window, origDesktop);
-                }
-                _vds.MoveWindowToDesktop(hwnd, origDesktop);
-            }
+            if (origDesktop != null) _vds.MoveWindowToDesktop(hwnd, origDesktop);
         }
-        finally
-        {
-            if (origDesktop != null) Marshal.ReleaseComObject(origDesktop);
-        }
+        finally { if (origDesktop != null) Marshal.ReleaseComObject(origDesktop); }
         _vds.RemoveDesktop(tempDesktop);
         Marshal.ReleaseComObject(tempDesktop);
     }
