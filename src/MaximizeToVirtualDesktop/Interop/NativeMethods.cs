@@ -80,6 +80,12 @@ internal static partial class NativeMethods
     internal static extern int GetSystemMetrics(int nIndex);
 
     [DllImport("user32.dll")]
+    internal static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+
+    internal const int GWL_EXSTYLE = -20;
+    internal const int WS_EX_TOPMOST = 0x00000008;
+
+    [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter,
         int X, int Y, int cx, int cy, uint uFlags);
@@ -87,6 +93,8 @@ internal static partial class NativeMethods
     internal const uint SWP_NOCOPYBITS = 0x0100;
     internal const uint SWP_NOZORDER = 0x0004;
     internal const uint SWP_NOACTIVATE = 0x0010;
+    internal const uint SWP_NOMOVE = 0x0002;
+    internal const uint SWP_NOSIZE = 0x0001;
 
     [DllImport("kernel32.dll")]
     internal static extern uint GetCurrentThreadId();

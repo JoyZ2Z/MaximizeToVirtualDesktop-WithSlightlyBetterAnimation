@@ -158,13 +158,25 @@ internal sealed class FullScreenManager
             }
         }
 
-        // 6. Switch to the new desktop. If window is already maximized (fallback path),
-        //    leave it as-is to avoid a flash of the desktop wallpaper.
+        // 6. Switch to the new desktop. Keep window topmost during switch to
+        //    prevent the desktop wallpaper from flashing through for a frame.
         //    If not maximized (hook/hotkey path), maximize after switching.
         bool elevated = NativeMethods.IsWindowElevated(hwnd);
+        const int HWND_TOPMOST = -1;
+        const int HWND_NOTOPMOST = -2;
+
+        bool wasTopmost = (NativeMethods.GetWindowLong(hwnd, NativeMethods.GWL_EXSTYLE) & NativeMethods.WS_EX_TOPMOST) != 0;
+        if (!wasTopmost)
+        {
+            NativeMethods.SetWindowPos(hwnd, (IntPtr)HWND_TOPMOST, 0, 0, 0, 0,
+                NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
+        }
 
         if (!_vds.SwitchToDesktop(tempDesktop))
         {
+            if (!wasTopmost)
+                NativeMethods.SetWindowPos(hwnd, (IntPtr)HWND_NOTOPMOST, 0, 0, 0, 0,
+                    NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
             RollbackSwitch(tempDesktop, originalDesktopId.Value, movedWindows, hwnd, originalPlacement, elevated);
             return;
         }
@@ -180,6 +192,13 @@ internal sealed class FullScreenManager
             }
         }
         NativeMethods.SetForegroundWindow(hwnd);
+
+        // Remove topmost now that switch is complete
+        if (!wasTopmost)
+        {
+            NativeMethods.SetWindowPos(hwnd, (IntPtr)HWND_NOTOPMOST, 0, 0, 0, 0,
+                NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
+        }
 
         // 7. Track the window
         _tracker.Track(hwnd, originalDesktopId.Value, tempDesktopId.Value, tempDesktop, processName, originalPlacement);
