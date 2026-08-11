@@ -13,6 +13,12 @@ internal enum DesktopSwitchMode
     Immediate = 0,
     /// <summary>Smooth — maximize animation first on current desktop, then silent switch.</summary>
     Smooth = 1,
+    /// <summary>Smooth-E — switch desktop BEFORE moving window.</summary>
+    SmoothE = 2,
+    /// <summary>Smooth-G — double-call Move & Switch (AHK-style).</summary>
+    SmoothG = 3,
+    /// <summary>Smooth-H — DwmFlush between Move & Switch.</summary>
+    SmoothH = 4,
 }
 
 /// <summary>

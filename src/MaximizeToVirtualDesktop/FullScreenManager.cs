@@ -118,37 +118,55 @@ internal sealed class FullScreenManager
 
         // 4. Maximize & switch — strategy depends on mode
         bool elevated = NativeMethods.IsWindowElevated(hwnd);
+        bool isSmooth = _settings.SwitchMode >= DesktopSwitchMode.Smooth;
 
-        if (_settings.SwitchMode == DesktopSwitchMode.Smooth)
+        if (isSmooth)
         {
-            // Smooth: animate maximize on current desktop, then pin window to all desktops,
-            // move to new desktop, switch, and unpin. Window is always visible — zero DWM gap.
             if (!elevated && NativeMethods.IsWindow(hwnd))
             {
                 NativeMethods.ShowWindow(hwnd, NativeMethods.SW_MAXIMIZE);
-                Thread.Sleep(300); // wait for animation to finish
+                Thread.Sleep(300);
             }
 
-            if (!_vds.PinWindow(hwnd))
-            {
-                Trace.WriteLine("FullScreenManager: PinWindow failed, falling back to move+switch.");
-            }
+            _vds.PinWindow(hwnd);
 
-            if (!_vds.MoveWindowToDesktop(hwnd, tempDesktop))
+            switch (_settings.SwitchMode)
             {
-                _vds.UnpinWindow(hwnd);
-                RollbackSwitch(tempDesktop, originalDesktopId.Value, hwnd, originalPlacement, elevated);
-                return;
-            }
+                case DesktopSwitchMode.SmoothE:
+                    // E: Switch FIRST, then Move. User never sees old desktop without window.
+                    if (!_vds.SwitchToDesktop(tempDesktop)) goto rollback;
+                    if (!_vds.MoveWindowToDesktop(hwnd, tempDesktop)) goto rollback;
+                    break;
 
-            if (!_vds.SwitchToDesktop(tempDesktop))
-            {
-                _vds.UnpinWindow(hwnd);
-                RollbackSwitch(tempDesktop, originalDesktopId.Value, hwnd, originalPlacement, elevated);
-                return;
+                case DesktopSwitchMode.SmoothG:
+                    // G: Double-call Move & Switch (AHK-style) to force DWM sync.
+                    _vds.MoveWindowToDesktop(hwnd, tempDesktop);
+                    if (!_vds.MoveWindowToDesktop(hwnd, tempDesktop)) goto rollback;
+                    _vds.SwitchToDesktop(tempDesktop);
+                    if (!_vds.SwitchToDesktop(tempDesktop)) goto rollback;
+                    break;
+
+                case DesktopSwitchMode.SmoothH:
+                    // H: DwmFlush between Move & Switch to wait for DWM composition.
+                    if (!_vds.MoveWindowToDesktop(hwnd, tempDesktop)) goto rollback;
+                    NativeMethods.DwmFlush();
+                    if (!_vds.SwitchToDesktop(tempDesktop)) goto rollback;
+                    NativeMethods.DwmFlush();
+                    break;
+
+                default: // Smooth
+                    if (!_vds.MoveWindowToDesktop(hwnd, tempDesktop)) goto rollback;
+                    if (!_vds.SwitchToDesktop(tempDesktop)) goto rollback;
+                    break;
             }
 
             _vds.UnpinWindow(hwnd);
+            goto done;
+
+            rollback:
+            _vds.UnpinWindow(hwnd);
+            RollbackSwitch(tempDesktop, originalDesktopId.Value, hwnd, originalPlacement, elevated);
+            return;
         }
         else // Immediate
         {
@@ -174,6 +192,8 @@ internal sealed class FullScreenManager
                 NativeMethods.ShowWindow(hwnd, NativeMethods.SW_MAXIMIZE);
             }
         }
+
+        done:
 
         ScheduleFocusRetry(hwnd, 4);
 
@@ -263,23 +283,49 @@ internal sealed class FullScreenManager
         var origDesktop = _vds.FindDesktop(entry.OriginalDesktopId);
         try
         {
-            if (_settings.SwitchMode == DesktopSwitchMode.Smooth)
+            bool isSmooth = _settings.SwitchMode >= DesktopSwitchMode.Smooth;
+
+            if (isSmooth)
             {
-                // Smooth: move already-maximized window back first (invisible),
-                // switch to original desktop, then play the restore animation.
-                if (origDesktop != null && NativeMethods.IsWindow(hwnd))
+                _vds.PinWindow(hwnd);
+
+                switch (_settings.SwitchMode)
                 {
-                    _vds.MoveWindowToDesktop(hwnd, origDesktop);
+                    case DesktopSwitchMode.SmoothE:
+                        if (origDesktop != null) _vds.SwitchToDesktop(origDesktop);
+                        if (origDesktop != null && NativeMethods.IsWindow(hwnd))
+                            _vds.MoveWindowToDesktop(hwnd, origDesktop);
+                        break;
+                    case DesktopSwitchMode.SmoothG:
+                        if (origDesktop != null && NativeMethods.IsWindow(hwnd))
+                        {
+                            _vds.MoveWindowToDesktop(hwnd, origDesktop);
+                            _vds.MoveWindowToDesktop(hwnd, origDesktop);
+                        }
+                        if (origDesktop != null)
+                        {
+                            _vds.SwitchToDesktop(origDesktop);
+                            _vds.SwitchToDesktop(origDesktop);
+                        }
+                        break;
+                    case DesktopSwitchMode.SmoothH:
+                        if (origDesktop != null && NativeMethods.IsWindow(hwnd))
+                            _vds.MoveWindowToDesktop(hwnd, origDesktop);
+                        NativeMethods.DwmFlush();
+                        if (origDesktop != null) _vds.SwitchToDesktop(origDesktop);
+                        NativeMethods.DwmFlush();
+                        break;
+                    default: // Smooth
+                        if (origDesktop != null && NativeMethods.IsWindow(hwnd))
+                            _vds.MoveWindowToDesktop(hwnd, origDesktop);
+                        if (origDesktop != null) _vds.SwitchToDesktop(origDesktop);
+                        break;
                 }
 
-                if (origDesktop != null)
-                {
-                    _vds.SwitchToDesktop(origDesktop);
-                }
+                _vds.UnpinWindow(hwnd);
 
                 if (!keepMinimized && NativeMethods.IsWindow(hwnd))
                 {
-                    // If already un-maximized by drag, keep user's position
                     var cur = NativeMethods.WINDOWPLACEMENT.Default;
                     if (NativeMethods.GetWindowPlacement(hwnd, ref cur)
                         && cur.showCmd == NativeMethods.SW_MAXIMIZE)

@@ -279,14 +279,27 @@ internal sealed class TrayApplication : Form
         var switchModeMenu = new ToolStripMenuItem("Switch Mode");
         var modeImmediate = new ToolStripMenuItem("Immediate",
             null, (_, _) => SetSwitchMode(DesktopSwitchMode.Immediate));
-        var modeSmooth = new ToolStripMenuItem("Smooth (animate first → switch)",
+        var modeSmooth = new ToolStripMenuItem("Smooth",
             null, (_, _) => SetSwitchMode(DesktopSwitchMode.Smooth));
+        var modeSmoothE = new ToolStripMenuItem("Smooth-E (switch first)",
+            null, (_, _) => SetSwitchMode(DesktopSwitchMode.SmoothE));
+        var modeSmoothG = new ToolStripMenuItem("Smooth-G (double-call)",
+            null, (_, _) => SetSwitchMode(DesktopSwitchMode.SmoothG));
+        var modeSmoothH = new ToolStripMenuItem("Smooth-H (DwmFlush)",
+            null, (_, _) => SetSwitchMode(DesktopSwitchMode.SmoothH));
         switchModeMenu.DropDownItems.Add(modeImmediate);
         switchModeMenu.DropDownItems.Add(modeSmooth);
+        switchModeMenu.DropDownItems.Add(new ToolStripSeparator());
+        switchModeMenu.DropDownItems.Add(modeSmoothE);
+        switchModeMenu.DropDownItems.Add(modeSmoothG);
+        switchModeMenu.DropDownItems.Add(modeSmoothH);
         switchModeMenu.DropDownOpening += (_, _) =>
         {
             modeImmediate.Checked = _settings.SwitchMode == DesktopSwitchMode.Immediate;
             modeSmooth.Checked = _settings.SwitchMode == DesktopSwitchMode.Smooth;
+            modeSmoothE.Checked = _settings.SwitchMode == DesktopSwitchMode.SmoothE;
+            modeSmoothG.Checked = _settings.SwitchMode == DesktopSwitchMode.SmoothG;
+            modeSmoothH.Checked = _settings.SwitchMode == DesktopSwitchMode.SmoothH;
         };
         menu.Items.Add(switchModeMenu);
 
