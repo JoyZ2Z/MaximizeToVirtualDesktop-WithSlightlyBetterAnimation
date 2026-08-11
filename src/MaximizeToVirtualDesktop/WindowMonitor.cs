@@ -26,8 +26,9 @@ internal sealed class WindowMonitor : IDisposable
     private readonly NativeMethods.WinEventProc _hideProc;
     private readonly NativeMethods.WinEventProc _moveSizeEndProc;
     private IntPtr _moveSizeEndHook;
-    // Debounce restore calls during drag — only execute after events settle for 200ms
-    private CancellationTokenSource? _restoreDebounceCts;
+    // Poll GetCapture: while user is dragging, defer restore; when mouse released, restore.
+    private IntPtr _pendingUnmaximizeHwnd;
+    private System.Windows.Forms.Timer? _dragWatchTimer;
     // Track windows that have been maximized but need to wait for resize end
     private readonly HashSet<IntPtr> _pendingMaximize = new();
 
@@ -103,12 +104,12 @@ internal sealed class WindowMonitor : IDisposable
                     bool isMinimized = NativeMethods.IsIconic(hwnd);
                     if (isMinimized)
                     {
-                        // Minimize: immediate restore (no drag possible when minimized)
                         MarshalToUiThread(() => _manager.Restore(hwnd, keepMinimized: true));
                     }
                     else
                     {
-                        DebounceRestore(hwnd);
+                        // Pending un-maximize — defer restore until mouse capture is released
+                        StartDragWatch(hwnd);
                     }
                     return;
                 }
@@ -168,25 +169,25 @@ internal sealed class WindowMonitor : IDisposable
         }
     }
 
-    private void DebounceRestore(IntPtr hwnd)
+    private void StartDragWatch(IntPtr hwnd)
     {
-        _restoreDebounceCts?.Cancel();
-        _restoreDebounceCts = new CancellationTokenSource();
-        var token = _restoreDebounceCts.Token;
-        _ = Task.Run(async () =>
+        _pendingUnmaximizeHwnd = hwnd;
+        if (_dragWatchTimer == null)
         {
-            try { await Task.Delay(200, token); }
-            catch (OperationCanceledException) { return; }
-            MarshalToUiThread(() =>
+            _dragWatchTimer = new System.Windows.Forms.Timer { Interval = 150 };
+            _dragWatchTimer.Tick += (_, _) =>
             {
-                if (NativeMethods.GetCapture() == hwnd)
+                if (_pendingUnmaximizeHwnd == IntPtr.Zero) { _dragWatchTimer.Stop(); return; }
+                if (NativeMethods.GetCapture() != _pendingUnmaximizeHwnd)
                 {
-                    DebounceRestore(hwnd);
-                    return;
+                    var h = _pendingUnmaximizeHwnd;
+                    _pendingUnmaximizeHwnd = IntPtr.Zero;
+                    _dragWatchTimer.Stop();
+                    _manager.Restore(h);
                 }
-                _manager.Restore(hwnd);
-            });
-        });
+            };
+        }
+        _dragWatchTimer.Start();
     }
 
     private void OnMoveSizeEnd(IntPtr hWinEventHook, uint eventType, IntPtr hwnd,
@@ -215,7 +216,7 @@ internal sealed class WindowMonitor : IDisposable
         Trace.WriteLine($"WindowMonitor: MoveSizeEnd: tracked window {hwnd} showCmd={placement.showCmd}.");
         if (placement.showCmd != NativeMethods.SW_MAXIMIZE && !NativeMethods.IsIconic(hwnd))
         {
-            DebounceRestore(hwnd);
+            StartDragWatch(hwnd);
         }
     }
 
@@ -257,6 +258,9 @@ internal sealed class WindowMonitor : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+
+        _dragWatchTimer?.Stop();
+        _dragWatchTimer?.Dispose();
 
         if (_locationChangeHook != IntPtr.Zero)
         {
