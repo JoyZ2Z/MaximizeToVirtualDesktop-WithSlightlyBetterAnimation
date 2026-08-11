@@ -259,6 +259,13 @@ internal sealed class TrayApplication : Form
         Trace.WriteLine($"TrayApplication: Switch mode set to {mode}.");
     }
 
+    private void SetTriggerKey(TriggerModifier key)
+    {
+        _settings.TriggerKey = key;
+        _settings.Save();
+        Trace.WriteLine($"TrayApplication: Trigger key set to {key}.");
+    }
+
     private ContextMenuStrip BuildContextMenu()
     {
         var menu = new ContextMenuStrip();
@@ -281,37 +288,41 @@ internal sealed class TrayApplication : Form
             null, (_, _) => SetSwitchMode(DesktopSwitchMode.Immediate));
         var modeSmooth = new ToolStripMenuItem("Smooth",
             null, (_, _) => SetSwitchMode(DesktopSwitchMode.Smooth));
-        var modeSmoothE = new ToolStripMenuItem("Smooth-E (switch first)",
-            null, (_, _) => SetSwitchMode(DesktopSwitchMode.SmoothE));
-        var modeSmoothG = new ToolStripMenuItem("Smooth-G (double-call)",
-            null, (_, _) => SetSwitchMode(DesktopSwitchMode.SmoothG));
-        var modeSmoothH = new ToolStripMenuItem("Smooth-H (DwmFlush)",
-            null, (_, _) => SetSwitchMode(DesktopSwitchMode.SmoothH));
         switchModeMenu.DropDownItems.Add(modeImmediate);
         switchModeMenu.DropDownItems.Add(modeSmooth);
-        switchModeMenu.DropDownItems.Add(new ToolStripSeparator());
-        switchModeMenu.DropDownItems.Add(modeSmoothE);
-        switchModeMenu.DropDownItems.Add(modeSmoothG);
-        switchModeMenu.DropDownItems.Add(modeSmoothH);
         switchModeMenu.DropDownOpening += (_, _) =>
         {
             modeImmediate.Checked = _settings.SwitchMode == DesktopSwitchMode.Immediate;
             modeSmooth.Checked = _settings.SwitchMode == DesktopSwitchMode.Smooth;
-            modeSmoothE.Checked = _settings.SwitchMode == DesktopSwitchMode.SmoothE;
-            modeSmoothG.Checked = _settings.SwitchMode == DesktopSwitchMode.SmoothG;
-            modeSmoothH.Checked = _settings.SwitchMode == DesktopSwitchMode.SmoothH;
         };
         menu.Items.Add(switchModeMenu);
 
-        // --- Shift Click toggle ---
-        var shiftClickItem = new ToolStripMenuItem("Double-click → Virtual Desktop", null, (_, _) =>
+        // --- Trigger Key submenu ---
+        var triggerMenu = new ToolStripMenuItem("Trigger Key");
+        var tkNone = new ToolStripMenuItem("None (direct trigger)",
+            null, (_, _) => SetTriggerKey(TriggerModifier.None));
+        var tkShift = new ToolStripMenuItem("Shift",
+            null, (_, _) => SetTriggerKey(TriggerModifier.Shift));
+        var tkCtrl = new ToolStripMenuItem("Ctrl",
+            null, (_, _) => SetTriggerKey(TriggerModifier.Ctrl));
+        var tkWin = new ToolStripMenuItem("Win",
+            null, (_, _) => SetTriggerKey(TriggerModifier.Win));
+        var tkAlt = new ToolStripMenuItem("Alt",
+            null, (_, _) => SetTriggerKey(TriggerModifier.Alt));
+        triggerMenu.DropDownItems.Add(tkNone);
+        triggerMenu.DropDownItems.Add(tkShift);
+        triggerMenu.DropDownItems.Add(tkCtrl);
+        triggerMenu.DropDownItems.Add(tkWin);
+        triggerMenu.DropDownItems.Add(tkAlt);
+        triggerMenu.DropDownOpening += (_, _) =>
         {
-            _settings.InvertShiftClick = !_settings.InvertShiftClick;
-            _settings.Save();
-            _trayIcon.Text = BuildTooltipText();
-        });
-        shiftClickItem.CheckOnClick = true;
-        menu.Items.Add(shiftClickItem);
+            tkNone.Checked = _settings.TriggerKey == TriggerModifier.None;
+            tkShift.Checked = _settings.TriggerKey == TriggerModifier.Shift;
+            tkCtrl.Checked = _settings.TriggerKey == TriggerModifier.Ctrl;
+            tkWin.Checked = _settings.TriggerKey == TriggerModifier.Win;
+            tkAlt.Checked = _settings.TriggerKey == TriggerModifier.Alt;
+        };
+        menu.Items.Add(triggerMenu);
 
         menu.Items.Add(new ToolStripSeparator());
 
@@ -349,11 +360,6 @@ internal sealed class TrayApplication : Form
             statusItem.Text = count == 0
                 ? "No windows tracked"
                 : $"{count} window(s) on virtual desktops";
-
-            shiftClickItem.Checked = _settings.InvertShiftClick;
-            shiftClickItem.Text = _settings.InvertShiftClick
-                ? "Double-click → Virtual Desktop"
-                : "Shift+Double-click → Virtual Desktop";
         };
 
         return menu;
@@ -469,13 +475,15 @@ internal sealed class TrayApplication : Form
             Directory.CreateDirectory(Path.GetDirectoryName(FirstRunMarker)!);
             File.WriteAllText(FirstRunMarker, "");
 
-            var maximizeKey = FormatHotkey(_settings.HotkeyModifiers, _settings.HotkeyKey);
+            var maxKey = FormatHotkey(_settings.HotkeyModifiers, _settings.HotkeyKey);
             var pinKey = FormatHotkey(_settings.PinHotkeyModifiers, _settings.PinHotkeyKey);
-            var clickDesc = _settings.InvertShiftClick ? "Click" : "Shift+Click";
+            var triggerText = _settings.TriggerKey == TriggerModifier.None
+                ? "Double-click title bar or click maximize button"
+                : $"{_settings.TriggerKey}+Click maximize button";
 
             _trayIcon.BalloonTipTitle = "Maximize to Virtual Desktop";
             _trayIcon.BalloonTipText =
-                $"Press {maximizeKey} or {clickDesc} the maximize button " +
+                $"Press {maxKey} or {triggerText} " +
                 "to maximize a window to its own virtual desktop.\n" +
                 $"Press {pinKey} to pin a window to all desktops.";
             _trayIcon.BalloonTipIcon = ToolTipIcon.Info;
@@ -521,18 +529,18 @@ internal sealed class TrayApplication : Form
         rtb.SelectionFont = new Font("Segoe UI Variable Display", 14f, FontStyle.Bold);
         rtb.AppendText("Maximize to Virtual Desktop\n\n");
 
-        var maximizeKey = FormatHotkey(settings.HotkeyModifiers, settings.HotkeyKey);
+        var maxKey = FormatHotkey(settings.HotkeyModifiers, settings.HotkeyKey);
         var pinKey = FormatHotkey(settings.PinHotkeyModifiers, settings.PinHotkeyKey);
-        var clickDesc = settings.InvertShiftClick
-            ? "Click maximize button"
-            : "Shift + Click maximize button";
-        var clickInstruction = settings.InvertShiftClick
-            ? "Click any window's maximize button. Hold Shift for a normal maximize."
-            : "Hold Shift and click any window's maximize button.";
+        var triggerText = settings.TriggerKey == TriggerModifier.None
+            ? "Double-click title bar or click maximize button"
+            : $"{settings.TriggerKey} + Click maximize button";
+        var triggerInst = settings.TriggerKey == TriggerModifier.None
+            ? "Double-click title bar or click maximize button on any window."
+            : $"Hold {settings.TriggerKey} and click maximize button or double-click title bar.";
 
         AppendSection(rtb, "Maximize a Window to Its Own Desktop",
-            (maximizeKey, "Toggles the focused window to/from its own virtual desktop."),
-            (clickDesc, clickInstruction));
+            (maxKey, "Toggles the focused window to/from its own virtual desktop."),
+            (triggerText, triggerInst));
 
         AppendSection(rtb, "Pin a Window to All Desktops",
             (pinKey, "Toggles pin/unpin so the focused window appears on every desktop."));
@@ -594,10 +602,11 @@ internal sealed class TrayApplication : Form
 
     private string BuildTooltipText()
     {
-        var maximize = FormatHotkey(_settings.HotkeyModifiers, _settings.HotkeyKey);
+        var max = FormatHotkey(_settings.HotkeyModifiers, _settings.HotkeyKey);
         var pin = FormatHotkey(_settings.PinHotkeyModifiers, _settings.PinHotkeyKey);
-        var click = _settings.InvertShiftClick ? "Click maximize" : "Shift+Click maximize";
-        return $"Maximize to Virtual Desktop\n{maximize} | {click} | {pin} to pin";
+        var click = _settings.TriggerKey == TriggerModifier.None
+            ? "Click maximize" : $"{_settings.TriggerKey}+Click maximize";
+        return $"Maximize to Virtual Desktop\n{max} | {click} | {pin} to pin";
     }
 
     private static string FormatHotkey(uint modifiers, uint vk)

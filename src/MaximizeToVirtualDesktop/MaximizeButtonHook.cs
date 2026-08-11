@@ -62,62 +62,67 @@ internal sealed class MaximizeButtonHook : IDisposable
     {
         if (nCode >= NativeMethods.HC_ACTION && wParam == (IntPtr)NativeMethods.WM_LBUTTONDOWN)
         {
-            bool shiftHeld = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_SHIFT) & 0x8000) != 0;
-            bool triggerVirtualDesktop = _settings.InvertShiftClick ? !shiftHeld : shiftHeld;
+            if (!IsTriggerActive()) return NativeMethods.CallNextHookEx(_hookHandle, nCode, wParam, lParam);
 
-            if (triggerVirtualDesktop)
+            var hookStruct = Marshal.PtrToStructure<NativeMethods.MSLLHOOKSTRUCT>(lParam);
+            var hwnd = NativeMethods.WindowFromPoint(hookStruct.pt);
+
+            if (hwnd != IntPtr.Zero)
             {
-                var hookStruct = Marshal.PtrToStructure<NativeMethods.MSLLHOOKSTRUCT>(lParam);
-                var hwnd = NativeMethods.WindowFromPoint(hookStruct.pt);
-
-                if (hwnd != IntPtr.Zero)
+                if (IsClickOnMaximizeButton(hwnd, hookStruct.pt))
                 {
-                    if (IsClickOnMaximizeButton(hwnd, hookStruct.pt))
+                    var buttonTopLevel = GetTopLevelWindow(hwnd);
+                    if (buttonTopLevel != IntPtr.Zero)
                     {
-                        var buttonTopLevel = GetTopLevelWindow(hwnd);
-                        if (buttonTopLevel != IntPtr.Zero)
-                        {
-                            PostToggle(buttonTopLevel);
-                            return (IntPtr)1;
-                        }
+                        PostToggle(buttonTopLevel);
+                        return (IntPtr)1;
                     }
+                }
 
-                    // 2) Title-bar double-click — suppress before Windows processes it
-                    var nowTicks = DateTime.UtcNow.Ticks;
-                    var elapsedMs = (nowTicks - _lastClickTicks) / TimeSpan.TicksPerMillisecond;
+                // Title-bar double-click
+                var nowTicks = DateTime.UtcNow.Ticks;
+                var elapsedMs = (nowTicks - _lastClickTicks) / TimeSpan.TicksPerMillisecond;
+                var topLevel = GetTopLevelWindow(hwnd);
+                var lastTopLevel = _lastClickHwnd != IntPtr.Zero
+                    ? GetTopLevelWindow(_lastClickHwnd) : IntPtr.Zero;
 
-                    // Compare top-level windows — WindowFromPoint may return different
-                    // child hwnds for UWP/Electron layered windows.
-                    var topLevel = GetTopLevelWindow(hwnd);
-                    var lastTopLevel = _lastClickHwnd != IntPtr.Zero
-                        ? GetTopLevelWindow(_lastClickHwnd) : IntPtr.Zero;
-
-                    if (elapsedMs > 0 && elapsedMs < DoubleClickTimeMs &&
-                        Math.Abs(hookStruct.pt.X - _lastClickX) < DoubleClickWidth &&
-                        Math.Abs(hookStruct.pt.Y - _lastClickY) < DoubleClickHeight &&
-                        topLevel != IntPtr.Zero && topLevel == lastTopLevel)
+                if (elapsedMs > 0 && elapsedMs < DoubleClickTimeMs &&
+                    Math.Abs(hookStruct.pt.X - _lastClickX) < DoubleClickWidth &&
+                    Math.Abs(hookStruct.pt.Y - _lastClickY) < DoubleClickHeight &&
+                    topLevel != IntPtr.Zero && topLevel == lastTopLevel)
+                {
+                    if (IsClickOnCaption(hwnd, hookStruct.pt))
                     {
-                        // Second click — verify it's on the caption bar
-                        if (IsClickOnCaption(hwnd, hookStruct.pt))
-                        {
-                            _lastClickTicks = 0;
-                            PostToggle(topLevel);
-                            return (IntPtr)1;
-                        }
+                        _lastClickTicks = 0;
+                        PostToggle(topLevel);
+                        return (IntPtr)1;
                     }
-                    else
-                    {
-                        // First click — record top-level window
-                        _lastClickTicks = nowTicks;
-                        _lastClickX = hookStruct.pt.X;
-                        _lastClickY = hookStruct.pt.Y;
-                        _lastClickHwnd = hwnd;
-                    }
+                }
+                else
+                {
+                    _lastClickTicks = nowTicks;
+                    _lastClickX = hookStruct.pt.X;
+                    _lastClickY = hookStruct.pt.Y;
+                    _lastClickHwnd = hwnd;
                 }
             }
         }
 
         return NativeMethods.CallNextHookEx(_hookHandle, nCode, wParam, lParam);
+    }
+
+    private bool IsTriggerActive()
+    {
+        return _settings.TriggerKey switch
+        {
+            TriggerModifier.None => true,
+            TriggerModifier.Shift => (NativeMethods.GetAsyncKeyState(NativeMethods.VK_SHIFT) & 0x8000) != 0,
+            TriggerModifier.Ctrl => (NativeMethods.GetAsyncKeyState(NativeMethods.VK_CONTROL) & 0x8000) != 0,
+            TriggerModifier.Win => (NativeMethods.GetAsyncKeyState(NativeMethods.VK_LWIN) & 0x8000) != 0
+                || (NativeMethods.GetAsyncKeyState(NativeMethods.VK_RWIN) & 0x8000) != 0,
+            TriggerModifier.Alt => (NativeMethods.GetAsyncKeyState(NativeMethods.VK_MENU) & 0x8000) != 0,
+            _ => true,
+        };
     }
 
     private void PostToggle(IntPtr topLevel)

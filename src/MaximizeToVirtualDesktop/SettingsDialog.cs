@@ -16,7 +16,7 @@ internal sealed class SettingsDialog : Form
     private readonly CheckBox _chkPinCtrl, _chkPinAlt, _chkPinShift, _chkPinWin;
     private readonly ComboBox _cmbPinKey;
 
-    private readonly CheckBox _chkInvertShiftClick;
+    private readonly ComboBox _cbTriggerKey;
     private readonly CheckBox _chkShowSwitchPopup;
     private Button _btnStartup = null!;
 
@@ -74,15 +74,17 @@ internal sealed class SettingsDialog : Form
             Location = new Point(10, 24),
         };
         grpBehavior.Controls.Add(_chkShowSwitchPopup);
-        // Existing checkbox for InvertShiftClick
-        _chkInvertShiftClick = new CheckBox
+        // Trigger key dropdown
+        grpBehavior.Controls.Add(new Label { Text = "Trigger modifier:", Location = new Point(10, 54), AutoSize = true });
+        _cbTriggerKey = new ComboBox
         {
-            Text = "Shift+Click performs a normal maximize instead",
-            AutoSize = true,
-            Checked = settings.InvertShiftClick,
-            Location = new Point(10, 54),
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            Location = new Point(120, 52),
+            Width = 80,
         };
-        grpBehavior.Controls.Add(_chkInvertShiftClick);
+        _cbTriggerKey.Items.AddRange(Enum.GetNames<TriggerModifier>());
+        _cbTriggerKey.SelectedItem = settings.TriggerKey.ToString();
+        grpBehavior.Controls.Add(_cbTriggerKey);
         y += grpBehavior.Height + 12;
 
         // Manage Startup group
@@ -198,7 +200,7 @@ internal sealed class SettingsDialog : Form
         _cmbPinKey.SelectedIndex = Array.FindIndex(SupportedKeys, k => k.Vk == NativeMethods.VK_P);
 
         _chkShowSwitchPopup.Checked = true;
-        _chkInvertShiftClick.Checked = true;
+        _cbTriggerKey.SelectedItem = nameof(TriggerModifier.None);
     }
 
     private void ToggleStartup()
@@ -261,7 +263,7 @@ internal sealed class SettingsDialog : Form
         _settings.PinHotkeyModifiers = BuildModifiers(_chkPinCtrl, _chkPinAlt, _chkPinShift, _chkPinWin);
         _settings.PinHotkeyKey       = _cmbPinKey.SelectedIndex >= 0 ? SupportedKeys[_cmbPinKey.SelectedIndex].Vk : NativeMethods.VK_P;
         _settings.ShowSwitchPopup    = _chkShowSwitchPopup.Checked;
-        _settings.InvertShiftClick   = _chkInvertShiftClick.Checked;
+        _settings.TriggerKey = Enum.Parse<TriggerModifier>((string)_cbTriggerKey.SelectedItem!);
     }
 
     private static uint BuildModifiers(CheckBox ctrl, CheckBox alt, CheckBox shift, CheckBox win)

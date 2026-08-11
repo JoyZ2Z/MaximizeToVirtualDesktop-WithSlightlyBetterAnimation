@@ -116,11 +116,10 @@ internal sealed class FullScreenManager
         }
         catch { /* Non-critical */ }
 
-        // 4. Maximize & switch — strategy depends on mode
+        // 4. Maximize & switch
         bool elevated = NativeMethods.IsWindowElevated(hwnd);
-        bool isSmooth = _settings.SwitchMode >= DesktopSwitchMode.Smooth;
 
-        if (isSmooth)
+        if (_settings.SwitchMode == DesktopSwitchMode.Smooth)
         {
             if (!elevated && NativeMethods.IsWindow(hwnd))
             {
@@ -130,43 +129,21 @@ internal sealed class FullScreenManager
 
             _vds.PinWindow(hwnd);
 
-            switch (_settings.SwitchMode)
+            if (!_vds.SwitchToDesktop(tempDesktop))
             {
-                case DesktopSwitchMode.SmoothE:
-                    // E: Switch FIRST, then Move. User never sees old desktop without window.
-                    if (!_vds.SwitchToDesktop(tempDesktop)) goto rollback;
-                    if (!_vds.MoveWindowToDesktop(hwnd, tempDesktop)) goto rollback;
-                    break;
+                _vds.UnpinWindow(hwnd);
+                RollbackSwitch(tempDesktop, originalDesktopId.Value, hwnd, originalPlacement, elevated);
+                return;
+            }
 
-                case DesktopSwitchMode.SmoothG:
-                    // G: Double-call Move & Switch (AHK-style) to force DWM sync.
-                    _vds.MoveWindowToDesktop(hwnd, tempDesktop);
-                    if (!_vds.MoveWindowToDesktop(hwnd, tempDesktop)) goto rollback;
-                    _vds.SwitchToDesktop(tempDesktop);
-                    if (!_vds.SwitchToDesktop(tempDesktop)) goto rollback;
-                    break;
-
-                case DesktopSwitchMode.SmoothH:
-                    // H: DwmFlush between Move & Switch to wait for DWM composition.
-                    if (!_vds.MoveWindowToDesktop(hwnd, tempDesktop)) goto rollback;
-                    NativeMethods.DwmFlush();
-                    if (!_vds.SwitchToDesktop(tempDesktop)) goto rollback;
-                    NativeMethods.DwmFlush();
-                    break;
-
-                default: // Smooth
-                    if (!_vds.MoveWindowToDesktop(hwnd, tempDesktop)) goto rollback;
-                    if (!_vds.SwitchToDesktop(tempDesktop)) goto rollback;
-                    break;
+            if (!_vds.MoveWindowToDesktop(hwnd, tempDesktop))
+            {
+                _vds.UnpinWindow(hwnd);
+                RollbackSwitch(tempDesktop, originalDesktopId.Value, hwnd, originalPlacement, elevated);
+                return;
             }
 
             _vds.UnpinWindow(hwnd);
-            goto done;
-
-            rollback:
-            _vds.UnpinWindow(hwnd);
-            RollbackSwitch(tempDesktop, originalDesktopId.Value, hwnd, originalPlacement, elevated);
-            return;
         }
         else // Immediate
         {
@@ -192,8 +169,6 @@ internal sealed class FullScreenManager
                 NativeMethods.ShowWindow(hwnd, NativeMethods.SW_MAXIMIZE);
             }
         }
-
-        done:
 
         ScheduleFocusRetry(hwnd, 4);
 
@@ -283,44 +258,13 @@ internal sealed class FullScreenManager
         var origDesktop = _vds.FindDesktop(entry.OriginalDesktopId);
         try
         {
-            bool isSmooth = _settings.SwitchMode >= DesktopSwitchMode.Smooth;
-
-            if (isSmooth)
+            if (_settings.SwitchMode == DesktopSwitchMode.Smooth)
             {
                 _vds.PinWindow(hwnd);
 
-                switch (_settings.SwitchMode)
-                {
-                    case DesktopSwitchMode.SmoothE:
-                        if (origDesktop != null) _vds.SwitchToDesktop(origDesktop);
-                        if (origDesktop != null && NativeMethods.IsWindow(hwnd))
-                            _vds.MoveWindowToDesktop(hwnd, origDesktop);
-                        break;
-                    case DesktopSwitchMode.SmoothG:
-                        if (origDesktop != null && NativeMethods.IsWindow(hwnd))
-                        {
-                            _vds.MoveWindowToDesktop(hwnd, origDesktop);
-                            _vds.MoveWindowToDesktop(hwnd, origDesktop);
-                        }
-                        if (origDesktop != null)
-                        {
-                            _vds.SwitchToDesktop(origDesktop);
-                            _vds.SwitchToDesktop(origDesktop);
-                        }
-                        break;
-                    case DesktopSwitchMode.SmoothH:
-                        if (origDesktop != null && NativeMethods.IsWindow(hwnd))
-                            _vds.MoveWindowToDesktop(hwnd, origDesktop);
-                        NativeMethods.DwmFlush();
-                        if (origDesktop != null) _vds.SwitchToDesktop(origDesktop);
-                        NativeMethods.DwmFlush();
-                        break;
-                    default: // Smooth
-                        if (origDesktop != null && NativeMethods.IsWindow(hwnd))
-                            _vds.MoveWindowToDesktop(hwnd, origDesktop);
-                        if (origDesktop != null) _vds.SwitchToDesktop(origDesktop);
-                        break;
-                }
+                if (origDesktop != null) _vds.SwitchToDesktop(origDesktop);
+                if (origDesktop != null && NativeMethods.IsWindow(hwnd))
+                    _vds.MoveWindowToDesktop(hwnd, origDesktop);
 
                 _vds.UnpinWindow(hwnd);
 

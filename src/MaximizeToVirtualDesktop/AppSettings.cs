@@ -9,54 +9,41 @@ namespace MaximizeToVirtualDesktop;
 /// </summary>
 internal enum DesktopSwitchMode
 {
-    /// <summary>Immediate — instant switch + maximize, no waiting.</summary>
     Immediate = 0,
-    /// <summary>Smooth — maximize animation first on current desktop, then silent switch.</summary>
     Smooth = 1,
-    /// <summary>Smooth-E — switch desktop BEFORE moving window.</summary>
-    SmoothE = 2,
-    /// <summary>Smooth-G — double-call Move & Switch (AHK-style).</summary>
-    SmoothG = 3,
-    /// <summary>Smooth-H — DwmFlush between Move & Switch.</summary>
-    SmoothH = 4,
+}
+
+internal enum TriggerModifier
+{
+    None = 0,
+    Shift = 1,
+    Ctrl = 2,
+    Win = 3,
+    Alt = 4,
 }
 
 /// <summary>
-/// Persists user-configurable settings.
-/// File lives in the same directory as the executable (portable).
+/// Persists user-configurable settings (portable — stored alongside exe).
 /// </summary>
 internal sealed class AppSettings
 {
     private static readonly string FilePath = Path.Combine(AppContext.BaseDirectory, "settings.json");
 
-    /// <summary>Modifier flags for the maximize hotkey (MOD_CONTROL | MOD_ALT | MOD_SHIFT etc.).</summary>
     public uint HotkeyModifiers { get; set; } =
         NativeMethods.MOD_CONTROL | NativeMethods.MOD_ALT | NativeMethods.MOD_SHIFT;
-
-    /// <summary>Virtual key code for the maximize hotkey.</summary>
     public uint HotkeyKey { get; set; } = NativeMethods.VK_X;
 
-    /// <summary>Modifier flags for the pin hotkey.</summary>
     public uint PinHotkeyModifiers { get; set; } =
         NativeMethods.MOD_CONTROL | NativeMethods.MOD_ALT | NativeMethods.MOD_SHIFT;
-
-    /// <summary>Virtual key code for the pin hotkey.</summary>
     public uint PinHotkeyKey { get; set; } = NativeMethods.VK_P;
 
-    /// <summary>
-    /// When true, any click on the maximize button sends the window to a virtual desktop.
-    /// Shift+Click performs a normal maximize instead.
-    /// </summary>
-    public bool InvertShiftClick { get; set; } = true;
+    /// <summary>Which modifier key must be held (if any) for the trigger to fire.
+    /// None = double-click/maximize directly triggers virtual desktop.
+    /// Shift/Ctrl/Win/Alt = hold that key to trigger.</summary>
+    public TriggerModifier TriggerKey { get; set; } = TriggerModifier.None;
 
-    /// <summary>
-    /// When true, show on-screen popup notifications when switching windows to/from virtual desktops.
-    /// </summary>
     public bool ShowSwitchPopup { get; set; } = true;
 
-    /// <summary>
-    /// Desktop switch animation: Atomic (24H2, smoothest), Animated (slide), or Instant.
-    /// </summary>
     public DesktopSwitchMode SwitchMode { get; set; } = DesktopSwitchMode.Immediate;
 
     public static AppSettings Load()

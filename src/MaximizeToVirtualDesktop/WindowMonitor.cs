@@ -84,6 +84,20 @@ internal sealed class WindowMonitor : IDisposable
         }
     }
 
+    private bool ShouldTriggerVirtualDesktop()
+    {
+        return _settings.TriggerKey switch
+        {
+            TriggerModifier.None => true,
+            TriggerModifier.Shift => (NativeMethods.GetAsyncKeyState(NativeMethods.VK_SHIFT) & 0x8000) != 0,
+            TriggerModifier.Ctrl => (NativeMethods.GetAsyncKeyState(NativeMethods.VK_CONTROL) & 0x8000) != 0,
+            TriggerModifier.Win => (NativeMethods.GetAsyncKeyState(NativeMethods.VK_LWIN) & 0x8000) != 0
+                || (NativeMethods.GetAsyncKeyState(NativeMethods.VK_RWIN) & 0x8000) != 0,
+            TriggerModifier.Alt => (NativeMethods.GetAsyncKeyState(NativeMethods.VK_MENU) & 0x8000) != 0,
+            _ => true,
+        };
+    }
+
     private void OnLocationChange(IntPtr hWinEventHook, uint eventType, IntPtr hwnd,
         int idObject, int idChild, uint idEventThread, uint dwmsEventTime)
     {
@@ -119,7 +133,7 @@ internal sealed class WindowMonitor : IDisposable
         if (newPlacement.showCmd != NativeMethods.SW_MAXIMIZE) return;
 
         bool shiftHeld = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_SHIFT) & 0x8000) != 0;
-        bool triggerVirtualDesktop = _settings.InvertShiftClick ? !shiftHeld : shiftHeld;
+        bool triggerVirtualDesktop = ShouldTriggerVirtualDesktop();
         if (triggerVirtualDesktop)
         {
             // Defer maximization until after the resize operation completes
