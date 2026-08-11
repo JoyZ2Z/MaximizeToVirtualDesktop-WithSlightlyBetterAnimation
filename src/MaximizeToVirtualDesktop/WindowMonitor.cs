@@ -108,17 +108,7 @@ internal sealed class WindowMonitor : IDisposable
                     }
                     else
                     {
-                        // Double-click or drag: debounce — only restore after events settle
-                        _restoreDebounceCts?.Cancel();
-                        _restoreDebounceCts = new CancellationTokenSource();
-                        var token = _restoreDebounceCts.Token;
-                        var capturedHwnd = hwnd;
-                        _ = Task.Run(async () =>
-                        {
-                            try { await Task.Delay(200, token); }
-                            catch (OperationCanceledException) { return; }
-                            MarshalToUiThread(() => _manager.Restore(capturedHwnd));
-                        });
+                        DebounceRestore(hwnd);
                     }
                     return;
                 }
@@ -178,6 +168,27 @@ internal sealed class WindowMonitor : IDisposable
         }
     }
 
+    private void DebounceRestore(IntPtr hwnd)
+    {
+        _restoreDebounceCts?.Cancel();
+        _restoreDebounceCts = new CancellationTokenSource();
+        var token = _restoreDebounceCts.Token;
+        _ = Task.Run(async () =>
+        {
+            try { await Task.Delay(200, token); }
+            catch (OperationCanceledException) { return; }
+            MarshalToUiThread(() =>
+            {
+                if (NativeMethods.GetCapture() == hwnd)
+                {
+                    DebounceRestore(hwnd);
+                    return;
+                }
+                _manager.Restore(hwnd);
+            });
+        });
+    }
+
     private void OnMoveSizeEnd(IntPtr hWinEventHook, uint eventType, IntPtr hwnd,
         int idObject, int idChild, uint idEventThread, uint dwmsEventTime)
     {
@@ -204,17 +215,7 @@ internal sealed class WindowMonitor : IDisposable
         Trace.WriteLine($"WindowMonitor: MoveSizeEnd: tracked window {hwnd} showCmd={placement.showCmd}.");
         if (placement.showCmd != NativeMethods.SW_MAXIMIZE && !NativeMethods.IsIconic(hwnd))
         {
-            // Use same debounce as OnLocationChange to avoid tripping during long drags
-            _restoreDebounceCts?.Cancel();
-            _restoreDebounceCts = new CancellationTokenSource();
-            var token = _restoreDebounceCts.Token;
-            var capturedHwnd = hwnd;
-            _ = Task.Run(async () =>
-            {
-                try { await Task.Delay(200, token); }
-                catch (OperationCanceledException) { return; }
-                MarshalToUiThread(() => _manager.Restore(capturedHwnd));
-            });
+            DebounceRestore(hwnd);
         }
     }
 
