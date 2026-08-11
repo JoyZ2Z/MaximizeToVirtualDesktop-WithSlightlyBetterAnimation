@@ -217,7 +217,7 @@ internal sealed class VirtualDesktopService : IDisposable
                 }
             }
 
-            _managerInternal!.SwitchDesktopWithAnimation(desktop);
+            _managerInternal!.SwitchDesktop(desktop);
 
             Trace.WriteLine($"VirtualDesktopService: Switched to desktop {desktop.GetId()}");
             return true;

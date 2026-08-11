@@ -183,7 +183,7 @@ internal sealed class FullScreenManager
             return;
         }
 
-        // 7. Maximize the primary window — delay lets desktop switch animation finish first
+        // 7. Maximize the primary window (no animation delay needed)
         bool elevated = NativeMethods.IsWindowElevated(hwnd);
         if (elevated)
         {
@@ -196,7 +196,6 @@ internal sealed class FullScreenManager
         }
         else
         {
-            Thread.Sleep(250);
             NativeMethods.ShowWindow(hwnd, NativeMethods.SW_MAXIMIZE);
         }
         NativeMethods.SetForegroundWindow(hwnd);
