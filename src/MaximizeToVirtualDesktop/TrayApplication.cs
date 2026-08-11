@@ -252,13 +252,6 @@ internal sealed class TrayApplication : Form
         _manager.PinToggle(hwnd);
     }
 
-    private void SetSwitchMode(DesktopSwitchMode mode)
-    {
-        _settings.SwitchMode = mode;
-        _settings.Save();
-        Trace.WriteLine($"TrayApplication: Switch mode set to {mode}.");
-    }
-
     private void SetTriggerKey(TriggerModifier key)
     {
         _settings.TriggerKey = key;
@@ -281,21 +274,6 @@ internal sealed class TrayApplication : Form
         menu.Items.Add(restoreAllItem);
 
         menu.Items.Add(new ToolStripSeparator());
-
-        // --- Switch Mode submenu ---
-        var switchModeMenu = new ToolStripMenuItem("Switch Mode");
-        var modeImmediate = new ToolStripMenuItem("Immediate",
-            null, (_, _) => SetSwitchMode(DesktopSwitchMode.Immediate));
-        var modeSmooth = new ToolStripMenuItem("Smooth",
-            null, (_, _) => SetSwitchMode(DesktopSwitchMode.Smooth));
-        switchModeMenu.DropDownItems.Add(modeImmediate);
-        switchModeMenu.DropDownItems.Add(modeSmooth);
-        switchModeMenu.DropDownOpening += (_, _) =>
-        {
-            modeImmediate.Checked = _settings.SwitchMode == DesktopSwitchMode.Immediate;
-            modeSmooth.Checked = _settings.SwitchMode == DesktopSwitchMode.Smooth;
-        };
-        menu.Items.Add(switchModeMenu);
 
         // --- Trigger Key submenu ---
         var triggerMenu = new ToolStripMenuItem("Trigger Key");

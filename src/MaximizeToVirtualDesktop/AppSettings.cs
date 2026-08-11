@@ -9,8 +9,7 @@ namespace MaximizeToVirtualDesktop;
 /// </summary>
 internal enum DesktopSwitchMode
 {
-    Immediate = 0,
-    Smooth = 1,
+    Smooth = 0,
 }
 
 internal enum TriggerModifier
@@ -44,7 +43,7 @@ internal sealed class AppSettings
 
     public bool ShowSwitchPopup { get; set; } = true;
 
-    public DesktopSwitchMode SwitchMode { get; set; } = DesktopSwitchMode.Immediate;
+    public DesktopSwitchMode SwitchMode { get; set; } = DesktopSwitchMode.Smooth;
 
     public static AppSettings Load()
     {

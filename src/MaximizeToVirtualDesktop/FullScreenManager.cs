@@ -119,56 +119,29 @@ internal sealed class FullScreenManager
         // 4. Maximize & switch
         bool elevated = NativeMethods.IsWindowElevated(hwnd);
 
-        if (_settings.SwitchMode == DesktopSwitchMode.Smooth)
+        if (!elevated && NativeMethods.IsWindow(hwnd))
         {
-            if (!elevated && NativeMethods.IsWindow(hwnd))
-            {
-                NativeMethods.ShowWindow(hwnd, NativeMethods.SW_MAXIMIZE);
-                Thread.Sleep(300);
-            }
+            NativeMethods.ShowWindow(hwnd, NativeMethods.SW_MAXIMIZE);
+            Thread.Sleep(300);
+        }
 
-            _vds.PinWindow(hwnd);
+        _vds.PinWindow(hwnd);
 
-            if (!_vds.SwitchToDesktop(tempDesktop))
-            {
-                _vds.UnpinWindow(hwnd);
-                RollbackSwitch(tempDesktop, originalDesktopId.Value, hwnd, originalPlacement, elevated);
-                return;
-            }
-
-            if (!_vds.MoveWindowToDesktop(hwnd, tempDesktop))
-            {
-                _vds.UnpinWindow(hwnd);
-                RollbackSwitch(tempDesktop, originalDesktopId.Value, hwnd, originalPlacement, elevated);
-                return;
-            }
-
+        if (!_vds.SwitchToDesktop(tempDesktop))
+        {
             _vds.UnpinWindow(hwnd);
+            RollbackSwitch(tempDesktop, originalDesktopId.Value, hwnd, originalPlacement, elevated);
+            return;
         }
-        else // Immediate
+
+        if (!_vds.MoveWindowToDesktop(hwnd, tempDesktop))
         {
-            if (!_vds.SwitchToDesktop(tempDesktop))
-            {
-                RollbackSwitch(tempDesktop, originalDesktopId.Value, hwnd, originalPlacement, elevated);
-                return;
-            }
-
-            if (!elevated && NativeMethods.IsWindow(hwnd))
-            {
-                NativeMethods.ShowWindow(hwnd, (int)NativeMethods.SW_SHOWNORMAL);
-            }
-
-            if (!_vds.MoveWindowToDesktop(hwnd, tempDesktop))
-            {
-                RollbackSwitch(tempDesktop, originalDesktopId.Value, hwnd, originalPlacement, elevated);
-                return;
-            }
-
-            if (!elevated && NativeMethods.IsWindow(hwnd))
-            {
-                NativeMethods.ShowWindow(hwnd, NativeMethods.SW_MAXIMIZE);
-            }
+            _vds.UnpinWindow(hwnd);
+            RollbackSwitch(tempDesktop, originalDesktopId.Value, hwnd, originalPlacement, elevated);
+            return;
         }
+
+        _vds.UnpinWindow(hwnd);
 
         ScheduleFocusRetry(hwnd, 4);
 
@@ -258,51 +231,24 @@ internal sealed class FullScreenManager
         var origDesktop = _vds.FindDesktop(entry.OriginalDesktopId);
         try
         {
-            if (_settings.SwitchMode == DesktopSwitchMode.Smooth)
+            _vds.PinWindow(hwnd);
+
+            if (origDesktop != null) _vds.SwitchToDesktop(origDesktop);
+            if (origDesktop != null && NativeMethods.IsWindow(hwnd))
+                _vds.MoveWindowToDesktop(hwnd, origDesktop);
+
+            _vds.UnpinWindow(hwnd);
+
+            if (!keepMinimized && NativeMethods.IsWindow(hwnd))
             {
-                _vds.PinWindow(hwnd);
-
-                if (origDesktop != null) _vds.SwitchToDesktop(origDesktop);
-                if (origDesktop != null && NativeMethods.IsWindow(hwnd))
-                    _vds.MoveWindowToDesktop(hwnd, origDesktop);
-
-                _vds.UnpinWindow(hwnd);
-
-                if (!keepMinimized && NativeMethods.IsWindow(hwnd))
+                var cur = NativeMethods.WINDOWPLACEMENT.Default;
+                if (NativeMethods.GetWindowPlacement(hwnd, ref cur)
+                    && cur.showCmd == NativeMethods.SW_MAXIMIZE)
                 {
-                    var cur = NativeMethods.WINDOWPLACEMENT.Default;
-                    if (NativeMethods.GetWindowPlacement(hwnd, ref cur)
-                        && cur.showCmd == NativeMethods.SW_MAXIMIZE)
-                    {
-                        var placement = entry.OriginalPlacement;
-                        NativeMethods.SetWindowPlacement(hwnd, ref placement);
-                    }
-                    NativeMethods.ShowWindow(hwnd, (int)NativeMethods.SW_SHOWNORMAL);
+                    var placement = entry.OriginalPlacement;
+                    NativeMethods.SetWindowPlacement(hwnd, ref placement);
                 }
-            }
-            else // Immediate
-            {
-                if (!keepMinimized && NativeMethods.IsWindow(hwnd))
-                {
-                    var cur = NativeMethods.WINDOWPLACEMENT.Default;
-                    if (NativeMethods.GetWindowPlacement(hwnd, ref cur)
-                        && cur.showCmd == NativeMethods.SW_MAXIMIZE)
-                    {
-                        var placement = entry.OriginalPlacement;
-                        NativeMethods.SetWindowPlacement(hwnd, ref placement);
-                    }
-                    NativeMethods.ShowWindow(hwnd, (int)NativeMethods.SW_SHOWNORMAL);
-                }
-
-                if (origDesktop != null && NativeMethods.IsWindow(hwnd))
-                {
-                    _vds.MoveWindowToDesktop(hwnd, origDesktop);
-                }
-
-                if (origDesktop != null)
-                {
-                    _vds.SwitchToDesktop(origDesktop);
-                }
+                NativeMethods.ShowWindow(hwnd, (int)NativeMethods.SW_SHOWNORMAL);
             }
         }
         finally
