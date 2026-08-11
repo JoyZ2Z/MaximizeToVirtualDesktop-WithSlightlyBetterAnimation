@@ -122,75 +122,67 @@ internal sealed class FullScreenManager
             // Non-critical, continue
         }
 
-        // 5. Move all windows to new desktop
+        // 5. Move secondary windows to new desktop first.
+        //    Primary window is moved LAST to minimize the gap on the current desktop.
         var movedWindows = new List<IntPtr>();
         foreach (var window in allWindows)
         {
+            if (window == hwnd) continue; // Primary — moved last
             if (_vds.MoveWindowToDesktop(window, tempDesktop))
             {
                 movedWindows.Add(window);
             }
-            else if (window == hwnd)
-            {
-                // Primary window failed — must rollback
-                Trace.WriteLine($"FullScreenManager: Failed to move primary window {window}, rolling back.");
-                var origDesktop = _vds.FindDesktop(originalDesktopId.Value);
-                try
-                {
-                    if (origDesktop != null)
-                    {
-                        foreach (var movedWindow in movedWindows)
-                        {
-                            _vds.MoveWindowToDesktop(movedWindow, origDesktop);
-                        }
-                    }
-                }
-                finally
-                {
-                    if (origDesktop != null) Marshal.ReleaseComObject(origDesktop);
-                }
-                _vds.RemoveDesktop(tempDesktop);
-                Marshal.ReleaseComObject(tempDesktop);
-                return;
-            }
             else
             {
-                // Secondary window failed — skip it, not critical
                 Trace.WriteLine($"FullScreenManager: Skipping secondary window {window} (move failed).");
             }
         }
 
-        // 6. Lock screen to suppress all drawing during transition,
-        //    restore → switch → maximize atomically, then unlock.
+        // 5b. Move primary window LAST — then immediately switch to close the DWM gap.
+        if (!_vds.MoveWindowToDesktop(hwnd, tempDesktop))
+        {
+            Trace.WriteLine($"FullScreenManager: Failed to move primary window {hwnd}, rolling back.");
+            var origDesktop = _vds.FindDesktop(originalDesktopId.Value);
+            try
+            {
+                if (origDesktop != null)
+                {
+                    foreach (var movedWindow in movedWindows)
+                        _vds.MoveWindowToDesktop(movedWindow, origDesktop);
+                }
+            }
+            finally
+            {
+                if (origDesktop != null) Marshal.ReleaseComObject(origDesktop);
+            }
+            _vds.RemoveDesktop(tempDesktop);
+            Marshal.ReleaseComObject(tempDesktop);
+            return;
+        }
+
+        // 6. Restore → switch → maximize, all paths.
+        //    Window is now on the new desktop (invisible). Restore to normal for animation,
+        //    switch desktop, then maximize — same unified animation for every app.
         bool elevated = NativeMethods.IsWindowElevated(hwnd);
 
-        NativeMethods.LockWindowUpdate(IntPtr.Zero);
-        try
+        if (!elevated && NativeMethods.IsWindow(hwnd))
         {
-            if (!elevated && NativeMethods.IsWindow(hwnd))
-            {
-                NativeMethods.ShowWindow(hwnd, (int)NativeMethods.SW_SHOWNORMAL);
-            }
-
-            if (!_vds.SwitchToDesktop(tempDesktop))
-            {
-                NativeMethods.LockWindowUpdate(IntPtr.Zero); // unlock before rollback
-                RollbackSwitch(tempDesktop, originalDesktopId.Value, movedWindows, hwnd, originalPlacement, elevated);
-                return;
-            }
-
-            if (!elevated && NativeMethods.IsWindow(hwnd))
-            {
-                NativeMethods.ShowWindow(hwnd, NativeMethods.SW_MAXIMIZE);
-            }
-        }
-        finally
-        {
-            NativeMethods.LockWindowUpdate(IntPtr.Zero);
+            NativeMethods.ShowWindow(hwnd, (int)NativeMethods.SW_SHOWNORMAL);
         }
 
-        // Retry focus — Electron/multi-process apps need multiple attempts
-        ScheduleFocusRetry(hwnd, 3);
+        if (!_vds.SwitchToDesktop(tempDesktop))
+        {
+            RollbackSwitch(tempDesktop, originalDesktopId.Value, movedWindows, hwnd, originalPlacement, elevated);
+            return;
+        }
+
+        if (!elevated && NativeMethods.IsWindow(hwnd))
+        {
+            NativeMethods.ShowWindow(hwnd, NativeMethods.SW_MAXIMIZE);
+        }
+
+        // Focus retry with virtual Alt tap
+        ScheduleFocusRetry(hwnd, 4);
 
         // 7. Track the window
         _tracker.Track(hwnd, originalDesktopId.Value, tempDesktopId.Value, tempDesktop, processName, originalPlacement);
@@ -203,7 +195,8 @@ internal sealed class FullScreenManager
     }
 
     /// <summary>
-    /// Retry SetForegroundWindow multiple times with delays — needed for multi-process apps (Electron etc.).
+    /// Retry SetForegroundWindow with virtual Alt tap — forces Windows to yield focus.
+    /// Needed for multi-process apps (Electron etc.).
     /// </summary>
     private void ScheduleFocusRetry(IntPtr hwnd, int attempts)
     {
@@ -212,6 +205,9 @@ internal sealed class FullScreenManager
             for (int i = 0; i < attempts; i++)
             {
                 await Task.Delay(80);
+                // Simulate Alt press to force foreground window activation
+                NativeMethods.keybd_event(NativeMethods.VK_MENU, 0, 0, UIntPtr.Zero);
+                NativeMethods.keybd_event(NativeMethods.VK_MENU, 0, NativeMethods.KEYEVENTF_KEYUP, UIntPtr.Zero);
                 if (!_syncControl.IsDisposed && _syncControl.IsHandleCreated)
                 {
                     try
@@ -253,6 +249,7 @@ internal sealed class FullScreenManager
                 {
                     _vds.MoveWindowToDesktop(window, origDesktop);
                 }
+                _vds.MoveWindowToDesktop(hwnd, origDesktop);
             }
         }
         finally
@@ -299,18 +296,9 @@ internal sealed class FullScreenManager
                 _vds.MoveWindowToDesktop(hwnd, origDesktop);
             }
 
-            // Switch back to original desktop — lock screen to prevent flash
             if (origDesktop != null)
             {
-                NativeMethods.LockWindowUpdate(IntPtr.Zero);
-                try
-                {
-                    _vds.SwitchToDesktop(origDesktop);
-                }
-                finally
-                {
-                    NativeMethods.LockWindowUpdate(IntPtr.Zero);
-                }
+                _vds.SwitchToDesktop(origDesktop);
             }
             else
             {

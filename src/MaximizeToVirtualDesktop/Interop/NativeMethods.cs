@@ -92,6 +92,12 @@ internal static partial class NativeMethods
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool LockWindowUpdate(IntPtr hWndLock);
 
+    internal const int VK_MENU = 0x12;
+    internal const int KEYEVENTF_KEYUP = 0x0002;
+
+    [DllImport("user32.dll")]
+    internal static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+
     internal const int GWL_EXSTYLE = -20;
     internal const int WS_EX_TOPMOST = 0x00000008;
 
