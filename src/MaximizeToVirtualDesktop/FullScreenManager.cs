@@ -185,27 +185,25 @@ internal sealed class FullScreenManager
             }
             NativeMethods.SetForegroundWindow(hwnd);
         }
-        else
+        else if (_settings.SwitchMode == DesktopSwitchMode.Atomic || _settings.SwitchMode == DesktopSwitchMode.Instant)
         {
-            // Atomic / Instant mode: maximize first, then switch without waiting
-            if (elevated)
+            // Atomic / Instant mode: switch first, then maximize.
+            // Same flow as Animated, but with instant switch and minimal delay.
+            if (!elevated && NativeMethods.IsWindow(hwnd))
             {
-                Trace.WriteLine("FullScreenManager: Window is elevated, cannot maximize via UIPI.");
-                if (_settings.ShowSwitchPopup)
-                {
-                    NotificationOverlay.ShowNotification("⚠ Elevated Window",
-                        "Press Win+↑ to maximize", hwnd);
-                }
-            }
-            else
-            {
-                NativeMethods.ShowWindow(hwnd, NativeMethods.SW_MAXIMIZE);
+                NativeMethods.ShowWindow(hwnd, (int)NativeMethods.SW_SHOWNORMAL);
             }
 
             if (!_vds.SwitchToDesktop(tempDesktop, _settings.SwitchMode))
             {
                 RollbackSwitch(tempDesktop, originalDesktopId.Value, movedWindows, hwnd, originalPlacement, elevated);
                 return;
+            }
+
+            if (!elevated && NativeMethods.IsWindow(hwnd))
+            {
+                Thread.Sleep(50);
+                NativeMethods.ShowWindow(hwnd, NativeMethods.SW_MAXIMIZE);
             }
             NativeMethods.SetForegroundWindow(hwnd);
         }

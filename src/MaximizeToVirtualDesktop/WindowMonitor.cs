@@ -134,6 +134,12 @@ internal sealed class WindowMonitor : IDisposable
                             if (_pendingMaximize.Contains(hwnd))
                             {
                                 _pendingMaximize.Remove(hwnd);
+                                // If already tracked, the hook path already handled it — don't double-trigger
+                                if (_tracker.IsTracked(hwnd))
+                                {
+                                    Trace.WriteLine($"WindowMonitor: Pending window {hwnd} already tracked, skipping fallback.");
+                                    return;
+                                }
                                 var placement = NativeMethods.WINDOWPLACEMENT.Default;
                                 bool isMaximized = NativeMethods.GetWindowPlacement(hwnd, ref placement) && placement.showCmd == NativeMethods.SW_MAXIMIZE;
                                 if (isMaximized)
