@@ -158,54 +158,59 @@ internal sealed class FullScreenManager
             }
         }
 
-        // 6. Maximize the window (invisible — user is still on original desktop)
+        // 6. Maximize & switch to the new desktop — strategy depends on mode
         bool elevated = NativeMethods.IsWindowElevated(hwnd);
-        if (elevated)
+
+        if (_settings.SwitchMode == DesktopSwitchMode.Animated)
         {
-            Trace.WriteLine("FullScreenManager: Window is elevated, cannot maximize via UIPI.");
-            if (_settings.ShowSwitchPopup)
+            // Animated mode: mimic the hotkey behavior.
+            // Restore window to normal size first (on new desktop, invisible to user),
+            // then switch with slide animation, then maximize — same as Ctrl+Shift+Alt+X.
+            if (!elevated && NativeMethods.IsWindow(hwnd))
             {
-                NotificationOverlay.ShowNotification("⚠ Elevated Window",
-                    "Press Win+↑ to maximize", hwnd);
+                NativeMethods.ShowWindow(hwnd, (int)NativeMethods.SW_SHOWNORMAL);
             }
+
+            if (!_vds.SwitchToDesktop(tempDesktop, DesktopSwitchMode.Animated))
+            {
+                RollbackSwitch(tempDesktop, originalDesktopId.Value, movedWindows, hwnd, originalPlacement, elevated);
+                return;
+            }
+
+            // Maximize after animation settles (same timing as original hotkey flow)
+            if (!elevated && NativeMethods.IsWindow(hwnd))
+            {
+                Thread.Sleep(250);
+                NativeMethods.ShowWindow(hwnd, NativeMethods.SW_MAXIMIZE);
+            }
+            NativeMethods.SetForegroundWindow(hwnd);
         }
         else
         {
-            NativeMethods.ShowWindow(hwnd, NativeMethods.SW_MAXIMIZE);
-        }
-
-        // 7. Switch to the new desktop (window is already maximized — no flicker)
-        if (!_vds.SwitchToDesktop(tempDesktop, _settings.SwitchMode))
-        {
-            // Rollback: restore window, move windows back, remove desktop
-            Trace.WriteLine("FullScreenManager: Failed to switch desktop, rolling back.");
-            if (!elevated && NativeMethods.IsWindow(hwnd))
+            // Atomic / Instant mode: maximize first, then switch without waiting
+            if (elevated)
             {
-                var rollbackPlacement = originalPlacement;
-                NativeMethods.SetWindowPlacement(hwnd, ref rollbackPlacement);
-            }
-            var origDesktop = _vds.FindDesktop(originalDesktopId.Value);
-            try
-            {
-                if (origDesktop != null)
+                Trace.WriteLine("FullScreenManager: Window is elevated, cannot maximize via UIPI.");
+                if (_settings.ShowSwitchPopup)
                 {
-                    foreach (var window in movedWindows)
-                    {
-                        _vds.MoveWindowToDesktop(window, origDesktop);
-                    }
+                    NotificationOverlay.ShowNotification("⚠ Elevated Window",
+                        "Press Win+↑ to maximize", hwnd);
                 }
             }
-            finally
+            else
             {
-                if (origDesktop != null) Marshal.ReleaseComObject(origDesktop);
+                NativeMethods.ShowWindow(hwnd, NativeMethods.SW_MAXIMIZE);
             }
-            _vds.RemoveDesktop(tempDesktop);
-            Marshal.ReleaseComObject(tempDesktop);
-            return;
-        }
-        NativeMethods.SetForegroundWindow(hwnd);
 
-        // 8. Track the window
+            if (!_vds.SwitchToDesktop(tempDesktop, _settings.SwitchMode))
+            {
+                RollbackSwitch(tempDesktop, originalDesktopId.Value, movedWindows, hwnd, originalPlacement, elevated);
+                return;
+            }
+            NativeMethods.SetForegroundWindow(hwnd);
+        }
+
+        // 7. Track the window
         _tracker.Track(hwnd, originalDesktopId.Value, tempDesktopId.Value, tempDesktop, processName, originalPlacement);
 
         if (_settings.ShowSwitchPopup)
@@ -213,6 +218,38 @@ internal sealed class FullScreenManager
             NotificationOverlay.ShowNotification("→ Virtual Desktop", processName ?? "", hwnd);
         }
         Trace.WriteLine($"FullScreenManager: Successfully moved window to desktop {tempDesktopId}");
+    }
+
+    /// <summary>
+    /// Rollback a failed desktop switch: restore window placement, move windows back, remove temp desktop.
+    /// </summary>
+    private void RollbackSwitch(IVirtualDesktop tempDesktop, Guid originalDesktopId,
+        List<IntPtr> movedWindows, IntPtr hwnd,
+        NativeMethods.WINDOWPLACEMENT originalPlacement, bool elevated)
+    {
+        Trace.WriteLine("FullScreenManager: Failed to switch desktop, rolling back.");
+        if (!elevated && NativeMethods.IsWindow(hwnd))
+        {
+            var rollbackPlacement = originalPlacement;
+            NativeMethods.SetWindowPlacement(hwnd, ref rollbackPlacement);
+        }
+        var origDesktop = _vds.FindDesktop(originalDesktopId);
+        try
+        {
+            if (origDesktop != null)
+            {
+                foreach (var window in movedWindows)
+                {
+                    _vds.MoveWindowToDesktop(window, origDesktop);
+                }
+            }
+        }
+        finally
+        {
+            if (origDesktop != null) Marshal.ReleaseComObject(origDesktop);
+        }
+        _vds.RemoveDesktop(tempDesktop);
+        Marshal.ReleaseComObject(tempDesktop);
     }
 
     /// <summary>
