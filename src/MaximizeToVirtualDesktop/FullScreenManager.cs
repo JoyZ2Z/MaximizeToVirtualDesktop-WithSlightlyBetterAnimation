@@ -122,23 +122,33 @@ internal sealed class FullScreenManager
             // Non-critical, continue
         }
 
-        // 5. Move secondary windows to new desktop first.
-        //    Primary window is moved LAST to minimize the gap on the current desktop.
+        // 5. Move secondary windows to new desktop (no visibility impact).
         var movedWindows = new List<IntPtr>();
         foreach (var window in allWindows)
         {
-            if (window == hwnd) continue; // Primary — moved last
+            if (window == hwnd) continue;
             if (_vds.MoveWindowToDesktop(window, tempDesktop))
-            {
                 movedWindows.Add(window);
-            }
             else
-            {
                 Trace.WriteLine($"FullScreenManager: Skipping secondary window {window} (move failed).");
-            }
         }
 
-        // 5b. Move primary window LAST — then immediately switch to close the DWM gap.
+        // 6. Switch FIRST (user sees new desktop wallpaper), then restore (invisible
+        //    on old desktop), then move window to new, then maximize with animation.
+        //    One unified code path for hook, double-click, and maximize-button flows.
+        bool elevated = NativeMethods.IsWindowElevated(hwnd);
+
+        if (!_vds.SwitchToDesktop(tempDesktop))
+        {
+            RollbackSwitch(tempDesktop, originalDesktopId.Value, movedWindows, hwnd, originalPlacement, elevated);
+            return;
+        }
+
+        if (!elevated && NativeMethods.IsWindow(hwnd))
+        {
+            NativeMethods.ShowWindow(hwnd, (int)NativeMethods.SW_SHOWNORMAL);
+        }
+
         if (!_vds.MoveWindowToDesktop(hwnd, tempDesktop))
         {
             Trace.WriteLine($"FullScreenManager: Failed to move primary window {hwnd}, rolling back.");
@@ -151,28 +161,9 @@ internal sealed class FullScreenManager
                         _vds.MoveWindowToDesktop(movedWindow, origDesktop);
                 }
             }
-            finally
-            {
-                if (origDesktop != null) Marshal.ReleaseComObject(origDesktop);
-            }
+            finally { if (origDesktop != null) Marshal.ReleaseComObject(origDesktop); }
             _vds.RemoveDesktop(tempDesktop);
             Marshal.ReleaseComObject(tempDesktop);
-            return;
-        }
-
-        // 6. Restore → switch → maximize, all paths.
-        //    Window is now on the new desktop (invisible). Restore to normal for animation,
-        //    switch desktop, then maximize — same unified animation for every app.
-        bool elevated = NativeMethods.IsWindowElevated(hwnd);
-
-        if (!elevated && NativeMethods.IsWindow(hwnd))
-        {
-            NativeMethods.ShowWindow(hwnd, (int)NativeMethods.SW_SHOWNORMAL);
-        }
-
-        if (!_vds.SwitchToDesktop(tempDesktop))
-        {
-            RollbackSwitch(tempDesktop, originalDesktopId.Value, movedWindows, hwnd, originalPlacement, elevated);
             return;
         }
 
@@ -285,8 +276,8 @@ internal sealed class FullScreenManager
             if (!keepMinimized && NativeMethods.IsWindow(hwnd))
             {
                 var placement = entry.OriginalPlacement;
-                placement.showCmd = NativeMethods.SW_SHOWNORMAL;
                 NativeMethods.SetWindowPlacement(hwnd, ref placement);
+                NativeMethods.ShowWindow(hwnd, (int)NativeMethods.SW_SHOWNORMAL);
             }
 
             // Move window back to original desktop

@@ -99,6 +99,11 @@ internal sealed class WindowMonitor : IDisposable
             {
                 if (placement.showCmd != NativeMethods.SW_MAXIMIZE)
                 {
+                    // If left mouse button is down, user is dragging the title bar —
+                    // let Windows handle the resize, don't interfere.
+                    bool isDragging = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_LBUTTON) & 0x8000) != 0;
+                    if (isDragging) return;
+
                     bool isMinimized = NativeMethods.IsIconic(hwnd);
                     Trace.WriteLine($"WindowMonitor: Tracked window {hwnd} un-maximized (minimized={isMinimized}).");
                     MarshalToUiThread(() => _manager.Restore(hwnd, keepMinimized: isMinimized));

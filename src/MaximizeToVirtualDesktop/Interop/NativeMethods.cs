@@ -259,6 +259,7 @@ internal static partial class NativeMethods
     internal const int HC_ACTION = 0;
 
     internal const int VK_SHIFT = 0x10;
+    internal const int VK_LBUTTON = 0x01;
 
     internal const uint MOD_CONTROL = 0x0002;
     internal const uint MOD_ALT = 0x0001;
