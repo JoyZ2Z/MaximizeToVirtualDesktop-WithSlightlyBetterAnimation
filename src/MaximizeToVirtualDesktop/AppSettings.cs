@@ -26,7 +26,9 @@ internal enum TriggerModifier
 /// </summary>
 internal sealed class AppSettings
 {
-    private static readonly string FilePath = Path.Combine(AppContext.BaseDirectory, "settings.json");
+    private static string SettingsDirectory =>
+        Path.GetDirectoryName(Application.ExecutablePath) ?? AppContext.BaseDirectory;
+    private static string FilePath => Path.Combine(SettingsDirectory, "settings.json");
 
     public uint HotkeyModifiers { get; set; } =
         NativeMethods.MOD_CONTROL | NativeMethods.MOD_ALT | NativeMethods.MOD_SHIFT;
@@ -42,6 +44,9 @@ internal sealed class AppSettings
     public TriggerModifier TriggerKey { get; set; } = TriggerModifier.None;
 
     public bool ShowSwitchPopup { get; set; } = true;
+
+    /// <summary>URL opened by the tray menu "Project Home" link.</summary>
+    public string ProjectUrl { get; set; } = "https://github.com/shanselman/MaximizeToVirtualDesktop";
 
     public DesktopSwitchMode SwitchMode { get; set; } = DesktopSwitchMode.Smooth;
 

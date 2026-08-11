@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using MaximizeToVirtualDesktop.Interop;
-using Updatum;
 
 namespace MaximizeToVirtualDesktop;
 
@@ -25,12 +24,6 @@ internal sealed class TrayApplication : Form
     private readonly MaximizeButtonHook _mouseHook;
     private readonly System.Windows.Forms.Timer _cleanupTimer;
     private System.Windows.Forms.Timer? _retryTimer;
-
-    internal static readonly UpdatumManager Updater = new("shanselman", "MaximizeToVirtualDesktop")
-    {
-        FetchOnlyLatestRelease = true,
-        InstallUpdateSingleFileExecutableName = "MaximizeToVirtualDesktop",
-    };
 
     public TrayApplication()
     {
@@ -91,21 +84,11 @@ internal sealed class TrayApplication : Form
         if (!_comInitialized)
         {
             Trace.WriteLine("TrayApplication: COM initialization failed — entering degraded mode.");
-            _trayIcon.Text = "Maximize to Virtual Desktop\n⚠️ COM failed — checking for updates...";
-            _trayIcon.BalloonTipTitle = "Maximize to Virtual Desktop";
-            _trayIcon.BalloonTipText =
-                "Virtual Desktop COM interface failed to initialize.\n" +
-                "This usually means Windows updated and broke the internal APIs.\n" +
-                "Checking for an updated version now...";
-            _trayIcon.BalloonTipIcon = ToolTipIcon.Warning;
+            _trayIcon.Text = "Maximize to Virtual Desktop\n⚠️ COM failed";
             _trayIcon.ShowBalloonTip(5000);
-
-            // Immediately check for updates, then retry every 5 minutes
-            _ = CheckForUpdatesAsync(userInitiated: false, comFailure: true);
             _retryTimer = new System.Windows.Forms.Timer { Interval = 5 * 60 * 1000 };
-            _retryTimer.Tick += async (_, _) =>
+            _retryTimer.Tick += (_, _) =>
             {
-                // Try reinitializing COM in case an in-place Windows update fixed it
                 if (_vds.Reinitialize())
                 {
                     Trace.WriteLine("TrayApplication: COM reinitialized successfully!");
@@ -115,9 +98,7 @@ internal sealed class TrayApplication : Form
                     _retryTimer = null;
                     _trayIcon.Text = BuildTooltipText();
                     StartMonitoring();
-                    return;
                 }
-                await CheckForUpdatesAsync(userInitiated: false, comFailure: true);
             };
             _retryTimer.Start();
 
@@ -139,9 +120,6 @@ internal sealed class TrayApplication : Form
 
         // Show first-run balloon tip
         ShowFirstRunBalloon();
-
-        // Check for updates asynchronously
-        _ = CheckForUpdatesAsync();
     }
 
     private void StartMonitoring()
@@ -252,13 +230,6 @@ internal sealed class TrayApplication : Form
         _manager.PinToggle(hwnd);
     }
 
-    private void SetTriggerKey(TriggerModifier key)
-    {
-        _settings.TriggerKey = key;
-        _settings.Save();
-        Trace.WriteLine($"TrayApplication: Trigger key set to {key}.");
-    }
-
     private ContextMenuStrip BuildContextMenu()
     {
         var menu = new ContextMenuStrip();
@@ -272,37 +243,6 @@ internal sealed class TrayApplication : Form
             _manager.RestoreAll();
         });
         menu.Items.Add(restoreAllItem);
-
-        menu.Items.Add(new ToolStripSeparator());
-
-        // --- Trigger Key submenu ---
-        var triggerMenu = new ToolStripMenuItem("Trigger Key");
-        var tkNone = new ToolStripMenuItem("None (direct trigger)",
-            null, (_, _) => SetTriggerKey(TriggerModifier.None));
-        var tkShift = new ToolStripMenuItem("Shift",
-            null, (_, _) => SetTriggerKey(TriggerModifier.Shift));
-        var tkCtrl = new ToolStripMenuItem("Ctrl",
-            null, (_, _) => SetTriggerKey(TriggerModifier.Ctrl));
-        var tkWin = new ToolStripMenuItem("Win",
-            null, (_, _) => SetTriggerKey(TriggerModifier.Win));
-        var tkAlt = new ToolStripMenuItem("Alt",
-            null, (_, _) => SetTriggerKey(TriggerModifier.Alt));
-        triggerMenu.DropDownItems.Add(tkNone);
-        triggerMenu.DropDownItems.Add(tkShift);
-        triggerMenu.DropDownItems.Add(tkCtrl);
-        triggerMenu.DropDownItems.Add(tkWin);
-        triggerMenu.DropDownItems.Add(tkAlt);
-        triggerMenu.DropDownOpening += (_, _) =>
-        {
-            tkNone.Checked = _settings.TriggerKey == TriggerModifier.None;
-            tkShift.Checked = _settings.TriggerKey == TriggerModifier.Shift;
-            tkCtrl.Checked = _settings.TriggerKey == TriggerModifier.Ctrl;
-            tkWin.Checked = _settings.TriggerKey == TriggerModifier.Win;
-            tkAlt.Checked = _settings.TriggerKey == TriggerModifier.Alt;
-        };
-        menu.Items.Add(triggerMenu);
-
-        menu.Items.Add(new ToolStripSeparator());
 
         var howToUseItem = new ToolStripMenuItem("How to Use", null, (_, _) =>
         {
@@ -318,11 +258,13 @@ internal sealed class TrayApplication : Form
 
         menu.Items.Add(new ToolStripSeparator());
 
-        var updateItem = new ToolStripMenuItem("Check for Updates...", null, async (_, _) =>
+        var githubItem = new ToolStripMenuItem("Project Home", null, (_, _) =>
         {
-            await CheckForUpdatesAsync(userInitiated: true);
+            var url = _settings.ProjectUrl;
+            if (!string.IsNullOrWhiteSpace(url))
+                Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
         });
-        menu.Items.Add(updateItem);
+        menu.Items.Add(githubItem);
 
         menu.Items.Add(new ToolStripSeparator());
 
@@ -389,60 +331,8 @@ internal sealed class TrayApplication : Form
         Trace.WriteLine("TrayApplication: Settings saved and hotkeys updated.");
     }
 
-    private async Task CheckForUpdatesAsync(bool userInitiated = false, bool comFailure = false)
-    {
-        try
-        {
-            if (!userInitiated && !comFailure) await Task.Delay(5000);
-
-            var updateFound = await Updater.CheckForUpdatesAsync();
-
-            if (!updateFound)
-            {
-                if (userInitiated)
-                    MessageBox.Show("You're running the latest version.", "No Updates",
-                        MessageBoxButtons.OK, MessageBoxIcon.Information);
-                if (comFailure)
-                    _trayIcon.Text = "Maximize to Virtual Desktop\n⚠️ COM failed — no update available yet";
-                return;
-            }
-
-            var release = Updater.LatestRelease!;
-            var changelog = Updater.GetChangelog(true) ?? "No release notes available.";
-
-            var message = comFailure
-                ? $"A fix may be available! Version {release.TagName} is ready.\n\n{changelog}\n\nDownload and install?"
-                : $"Version {release.TagName} is available.\n\n{changelog}\n\nDownload and install?";
-
-            var result = MessageBox.Show(message,
-                comFailure ? "Update Available — May Fix COM Issue" : "Update Available",
-                MessageBoxButtons.YesNo, MessageBoxIcon.Information);
-
-            if (result == DialogResult.Yes)
-            {
-                var asset = await Updater.DownloadUpdateAsync();
-                if (asset != null)
-                {
-                    await Updater.InstallUpdateAsync(asset);
-                }
-                else if (userInitiated)
-                {
-                    MessageBox.Show("Failed to download the update.", "Update Error",
-                        MessageBoxButtons.OK, MessageBoxIcon.Error);
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            Trace.WriteLine($"TrayApplication: Update check failed: {ex.Message}");
-            if (userInitiated)
-                MessageBox.Show($"Update check failed: {ex.Message}", "Update Error",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
-    }
-
-    private static readonly string FirstRunMarker = Path.Combine(
-        AppContext.BaseDirectory, ".firstrun");
+    private static string FirstRunMarker =>
+        Path.Combine(Path.GetDirectoryName(Application.ExecutablePath) ?? ".", ".firstrun");
 
     private void ShowFirstRunBalloon()
     {
