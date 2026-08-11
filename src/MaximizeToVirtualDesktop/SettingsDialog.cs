@@ -198,7 +198,7 @@ internal sealed class SettingsDialog : Form
         _cmbPinKey.SelectedIndex = Array.FindIndex(SupportedKeys, k => k.Vk == NativeMethods.VK_P);
 
         _chkShowSwitchPopup.Checked = true;
-        _chkInvertShiftClick.Checked = false;
+        _chkInvertShiftClick.Checked = true;
     }
 
     private void ToggleStartup()

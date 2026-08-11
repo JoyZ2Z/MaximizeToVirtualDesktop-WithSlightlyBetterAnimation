@@ -32,7 +32,7 @@ internal sealed class AppSettings
     /// When true, any click on the maximize button sends the window to a virtual desktop.
     /// Shift+Click performs a normal maximize instead.
     /// </summary>
-    public bool InvertShiftClick { get; set; } = false;
+    public bool InvertShiftClick { get; set; } = true;
 
     /// <summary>
     /// When true, show on-screen popup notifications when switching windows to/from virtual desktops.
