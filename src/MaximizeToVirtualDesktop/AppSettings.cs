@@ -9,8 +9,10 @@ namespace MaximizeToVirtualDesktop;
 /// </summary>
 internal enum DesktopSwitchMode
 {
-    /// <summary>Immediate — no animations, instant switch + maximize.</summary>
+    /// <summary>Immediate — instant switch + maximize, no waiting.</summary>
     Immediate = 0,
+    /// <summary>Smooth — maximize animation first on current desktop, then silent switch.</summary>
+    Smooth = 1,
 }
 
 /// <summary>

@@ -116,30 +116,54 @@ internal sealed class FullScreenManager
         }
         catch { /* Non-critical */ }
 
-        // 4. Switch to new desktop, restore on old (invisible), move window, maximize.
+        // 4. Maximize & switch — strategy depends on mode
         bool elevated = NativeMethods.IsWindowElevated(hwnd);
 
-        if (!_vds.SwitchToDesktop(tempDesktop))
+        if (_settings.SwitchMode == DesktopSwitchMode.Smooth)
         {
-            RollbackSwitch(tempDesktop, originalDesktopId.Value, hwnd, originalPlacement, elevated);
-            return;
-        }
+            // Smooth: maximize first on current desktop (user sees animation),
+            // then silently move the already-maximized window to the new desktop.
+            if (!elevated && NativeMethods.IsWindow(hwnd))
+            {
+                NativeMethods.ShowWindow(hwnd, NativeMethods.SW_MAXIMIZE);
+                Thread.Sleep(300); // wait for animation to finish
+            }
 
-        if (!elevated && NativeMethods.IsWindow(hwnd))
-        {
-            NativeMethods.ShowWindow(hwnd, (int)NativeMethods.SW_SHOWNORMAL);
-        }
+            if (!_vds.MoveWindowToDesktop(hwnd, tempDesktop))
+            {
+                RollbackSwitch(tempDesktop, originalDesktopId.Value, hwnd, originalPlacement, elevated);
+                return;
+            }
 
-        if (!_vds.MoveWindowToDesktop(hwnd, tempDesktop))
-        {
-            Trace.WriteLine($"FullScreenManager: Failed to move window {hwnd}, rolling back.");
-            RollbackSwitch(tempDesktop, originalDesktopId.Value, hwnd, originalPlacement, elevated);
-            return;
+            if (!_vds.SwitchToDesktop(tempDesktop))
+            {
+                RollbackSwitch(tempDesktop, originalDesktopId.Value, hwnd, originalPlacement, elevated);
+                return;
+            }
         }
-
-        if (!elevated && NativeMethods.IsWindow(hwnd))
+        else // Immediate
         {
-            NativeMethods.ShowWindow(hwnd, NativeMethods.SW_MAXIMIZE);
+            if (!_vds.SwitchToDesktop(tempDesktop))
+            {
+                RollbackSwitch(tempDesktop, originalDesktopId.Value, hwnd, originalPlacement, elevated);
+                return;
+            }
+
+            if (!elevated && NativeMethods.IsWindow(hwnd))
+            {
+                NativeMethods.ShowWindow(hwnd, (int)NativeMethods.SW_SHOWNORMAL);
+            }
+
+            if (!_vds.MoveWindowToDesktop(hwnd, tempDesktop))
+            {
+                RollbackSwitch(tempDesktop, originalDesktopId.Value, hwnd, originalPlacement, elevated);
+                return;
+            }
+
+            if (!elevated && NativeMethods.IsWindow(hwnd))
+            {
+                NativeMethods.ShowWindow(hwnd, NativeMethods.SW_MAXIMIZE);
+            }
         }
 
         ScheduleFocusRetry(hwnd, 4);
@@ -230,32 +254,56 @@ internal sealed class FullScreenManager
         var origDesktop = _vds.FindDesktop(entry.OriginalDesktopId);
         try
         {
-            if (!keepMinimized && NativeMethods.IsWindow(hwnd))
+            if (_settings.SwitchMode == DesktopSwitchMode.Smooth)
             {
-                // If window was already restored by Windows (drag), keep user's position.
-                // Otherwise (double-click/restore button), reset to pre-maximize placement.
-                var cur = NativeMethods.WINDOWPLACEMENT.Default;
-                if (NativeMethods.GetWindowPlacement(hwnd, ref cur) && cur.showCmd == NativeMethods.SW_MAXIMIZE)
+                // Smooth: move already-maximized window back first (invisible),
+                // switch to original desktop, then play the restore animation.
+                if (origDesktop != null && NativeMethods.IsWindow(hwnd))
                 {
-                    var placement = entry.OriginalPlacement;
-                    NativeMethods.SetWindowPlacement(hwnd, ref placement);
+                    _vds.MoveWindowToDesktop(hwnd, origDesktop);
                 }
-                NativeMethods.ShowWindow(hwnd, (int)NativeMethods.SW_SHOWNORMAL);
-            }
 
-            // Move window back to original desktop
-            if (origDesktop != null && NativeMethods.IsWindow(hwnd))
-            {
-                _vds.MoveWindowToDesktop(hwnd, origDesktop);
-            }
+                if (origDesktop != null)
+                {
+                    _vds.SwitchToDesktop(origDesktop);
+                }
 
-            if (origDesktop != null)
-            {
-                _vds.SwitchToDesktop(origDesktop);
+                if (!keepMinimized && NativeMethods.IsWindow(hwnd))
+                {
+                    // If already un-maximized by drag, keep user's position
+                    var cur = NativeMethods.WINDOWPLACEMENT.Default;
+                    if (NativeMethods.GetWindowPlacement(hwnd, ref cur)
+                        && cur.showCmd == NativeMethods.SW_MAXIMIZE)
+                    {
+                        var placement = entry.OriginalPlacement;
+                        NativeMethods.SetWindowPlacement(hwnd, ref placement);
+                    }
+                    NativeMethods.ShowWindow(hwnd, (int)NativeMethods.SW_SHOWNORMAL);
+                }
             }
-            else
+            else // Immediate
             {
-                Trace.WriteLine("FullScreenManager: Original desktop no longer exists, leaving window on current.");
+                if (!keepMinimized && NativeMethods.IsWindow(hwnd))
+                {
+                    var cur = NativeMethods.WINDOWPLACEMENT.Default;
+                    if (NativeMethods.GetWindowPlacement(hwnd, ref cur)
+                        && cur.showCmd == NativeMethods.SW_MAXIMIZE)
+                    {
+                        var placement = entry.OriginalPlacement;
+                        NativeMethods.SetWindowPlacement(hwnd, ref placement);
+                    }
+                    NativeMethods.ShowWindow(hwnd, (int)NativeMethods.SW_SHOWNORMAL);
+                }
+
+                if (origDesktop != null && NativeMethods.IsWindow(hwnd))
+                {
+                    _vds.MoveWindowToDesktop(hwnd, origDesktop);
+                }
+
+                if (origDesktop != null)
+                {
+                    _vds.SwitchToDesktop(origDesktop);
+                }
             }
         }
         finally
