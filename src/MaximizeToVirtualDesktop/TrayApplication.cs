@@ -441,8 +441,7 @@ internal sealed class TrayApplication : Form
     }
 
     private static readonly string FirstRunMarker = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "MaximizeToVirtualDesktop", ".firstrun");
+        AppContext.BaseDirectory, ".firstrun");
 
     private void ShowFirstRunBalloon()
     {

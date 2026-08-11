@@ -15,13 +15,11 @@ internal enum DesktopSwitchMode
 
 /// <summary>
 /// Persists user-configurable settings.
-/// File lives in %LOCALAPPDATA%\MaximizeToVirtualDesktop\settings.json.
+/// File lives in the same directory as the executable (portable).
 /// </summary>
 internal sealed class AppSettings
 {
-    private static readonly string FilePath = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "MaximizeToVirtualDesktop", "settings.json");
+    private static readonly string FilePath = Path.Combine(AppContext.BaseDirectory, "settings.json");
 
     /// <summary>Modifier flags for the maximize hotkey (MOD_CONTROL | MOD_ALT | MOD_SHIFT etc.).</summary>
     public uint HotkeyModifiers { get; set; } =
