@@ -160,22 +160,9 @@ internal sealed class FullScreenManager
             return;
         }
 
-        // 6. Show a solid black overlay to cover the DWM gap during transition.
-        //    DWM recomposes the current desktop asynchronously after MoveWindowToDesktop,
-        //    exposing the wallpaper. This overlay sits on top during the brief gap.
-        using var cover = new Form
-        {
-            FormBorderStyle = FormBorderStyle.None,
-            WindowState = FormWindowState.Maximized,
-            TopMost = true,
-            ShowInTaskbar = false,
-            BackColor = Color.Black,
-            StartPosition = FormStartPosition.Manual,
-            Location = Point.Empty
-        };
-        cover.Show();
-
-        // Restore → switch → maximize — window is on new desktop, invisible to user
+        // 6. Restore → switch → maximize, all paths.
+        //    Window is now on the new desktop (invisible). Restore to normal for animation,
+        //    switch desktop, then maximize — same unified animation for every app.
         bool elevated = NativeMethods.IsWindowElevated(hwnd);
 
         if (!elevated && NativeMethods.IsWindow(hwnd))
@@ -193,9 +180,6 @@ internal sealed class FullScreenManager
         {
             NativeMethods.ShowWindow(hwnd, NativeMethods.SW_MAXIMIZE);
         }
-
-        // Transition complete — remove overlay
-        cover.Close();
 
         // Focus retry with virtual Alt tap
         ScheduleFocusRetry(hwnd, 4);
@@ -301,9 +285,8 @@ internal sealed class FullScreenManager
             if (!keepMinimized && NativeMethods.IsWindow(hwnd))
             {
                 var placement = entry.OriginalPlacement;
+                placement.showCmd = NativeMethods.SW_SHOWNORMAL;
                 NativeMethods.SetWindowPlacement(hwnd, ref placement);
-                // Ensure the window is shown in its normal (not maximized) state
-                NativeMethods.ShowWindow(hwnd, (int)NativeMethods.SW_SHOWNORMAL);
             }
 
             // Move window back to original desktop
@@ -314,20 +297,7 @@ internal sealed class FullScreenManager
 
             if (origDesktop != null)
             {
-                // Cover the DWM gap during desktop switch
-                using var cover = new Form
-                {
-                    FormBorderStyle = FormBorderStyle.None,
-                    WindowState = FormWindowState.Maximized,
-                    TopMost = true,
-                    ShowInTaskbar = false,
-                    BackColor = Color.Black,
-                    StartPosition = FormStartPosition.Manual,
-                    Location = Point.Empty
-                };
-                cover.Show();
                 _vds.SwitchToDesktop(origDesktop);
-                cover.Close();
             }
             else
             {

@@ -72,8 +72,19 @@ internal sealed class MaximizeButtonHook : IDisposable
 
                 if (hwnd != IntPtr.Zero)
                 {
-                    // 1) Maximize button click — already handled, suppresses click
+                    // 1) Standard maximize button (WM_NCHITTEST returns HTMAXBUTTON)
                     if (IsClickOnMaximizeButton(hwnd, hookStruct.pt))
+                    {
+                        var topLevel = GetTopLevelWindow(hwnd);
+                        if (topLevel != IntPtr.Zero)
+                        {
+                            PostToggle(topLevel);
+                            return (IntPtr)1;
+                        }
+                    }
+                    // 2) Geometry fallback — Electron/Chromium custom title bars
+                    //    don't return HTMAXBUTTON from WM_NCHITTEST. Detect by position.
+                    else if (IsClickInMaximizeArea(hwnd, hookStruct.pt))
                     {
                         var topLevel = GetTopLevelWindow(hwnd);
                         if (topLevel != IntPtr.Zero)
@@ -162,6 +173,41 @@ internal sealed class MaximizeButtonHook : IDisposable
             if (result == IntPtr.Zero) return false;
             var hit = hitResult.ToInt32();
             return hit == NativeMethods.HTCAPTION || hit == NativeMethods.HTSYSMENU || hit == NativeMethods.HTMENU;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Geometry-based maximize button detection for apps whose WM_NCHITTEST
+    /// doesn't return HTMAXBUTTON (Electron, Chromium, custom-drawn title bars).
+    /// </summary>
+    private static bool IsClickInMaximizeArea(IntPtr hwnd, NativeMethods.POINT pt)
+    {
+        try
+        {
+            if (!NativeMethods.GetWindowRect(hwnd, out var rect)) return false;
+            if (rect.Right - rect.Left <= 0) return false;
+
+            int buttonW = NativeMethods.GetSystemMetrics(NativeMethods.SM_CXSIZE);
+            int border = NativeMethods.GetSystemMetrics(NativeMethods.SM_CXFRAME);
+            int captionH = NativeMethods.GetSystemMetrics(NativeMethods.SM_CYCAPTION);
+
+            // Maximize button is second from right (right of minimize, left of close)
+            int closeRight = rect.Right - border;
+            int maximizeRight = closeRight - buttonW;
+            int maximizeLeft = maximizeRight - buttonW;
+            int buttonTop = rect.Top + border;
+            int buttonBottom = buttonTop + captionH;
+
+            // Slightly widen the detection area for custom layouts
+            maximizeRight += 4;
+            maximizeLeft -= 4;
+
+            return pt.X >= maximizeLeft && pt.X <= maximizeRight
+                && pt.Y >= buttonTop && pt.Y <= buttonBottom;
         }
         catch
         {

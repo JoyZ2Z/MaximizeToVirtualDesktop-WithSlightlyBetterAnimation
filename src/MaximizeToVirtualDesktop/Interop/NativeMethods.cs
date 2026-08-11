@@ -241,6 +241,19 @@ internal static partial class NativeMethods
 
     internal const int SM_CXDOUBLECLK = 36;
     internal const int SM_CYDOUBLECLK = 37;
+    internal const int SM_CXSIZE = 30;
+    internal const int SM_CXFRAME = 32;
+    internal const int SM_CYCAPTION = 4;
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct RECT
+    {
+        public int Left, Top, Right, Bottom;
+    }
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
 
     internal const int WH_MOUSE_LL = 14;
     internal const int HC_ACTION = 0;
@@ -301,12 +314,6 @@ internal static partial class NativeMethods
                 return wp;
             }
         }
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    internal struct RECT
-    {
-        public int Left, Top, Right, Bottom;
     }
 
     internal const uint SW_SHOWNORMAL = 1;
