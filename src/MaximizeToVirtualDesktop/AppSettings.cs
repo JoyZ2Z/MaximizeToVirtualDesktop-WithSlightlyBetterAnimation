@@ -54,7 +54,12 @@ internal sealed class AppSettings
     {
         try
         {
-            if (!File.Exists(FilePath)) return new AppSettings();
+            Trace.WriteLine($"AppSettings: loading from {FilePath}");
+            if (!File.Exists(FilePath))
+            {
+                Trace.WriteLine("AppSettings: file not found, using defaults.");
+                return new AppSettings();
+            }
             var json = File.ReadAllText(FilePath);
             return JsonSerializer.Deserialize<AppSettings>(json) ?? new AppSettings();
         }
