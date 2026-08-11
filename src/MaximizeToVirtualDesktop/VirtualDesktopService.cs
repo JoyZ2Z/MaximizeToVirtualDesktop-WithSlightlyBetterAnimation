@@ -195,6 +195,11 @@ internal sealed class VirtualDesktopService : IDisposable
 
     public bool SwitchToDesktop(IVirtualDesktop desktop)
     {
+        return SwitchToDesktop(desktop, DesktopSwitchMode.Instant);
+    }
+
+    public bool SwitchToDesktop(IVirtualDesktop desktop, DesktopSwitchMode mode)
+    {
         try
         {
             // Activate the taskbar to prevent flashing icons (from MScholtes)
@@ -217,7 +222,18 @@ internal sealed class VirtualDesktopService : IDisposable
                 }
             }
 
-            _managerInternal!.SwitchDesktop(desktop);
+            switch (mode)
+            {
+                case DesktopSwitchMode.Atomic:
+                    _managerInternal!.SwitchDesktopAtomic(desktop);
+                    break;
+                case DesktopSwitchMode.Animated:
+                    _managerInternal!.SwitchDesktopWithAnimation(desktop);
+                    break;
+                default:
+                    _managerInternal!.SwitchDesktop(desktop);
+                    break;
+            }
 
             Trace.WriteLine($"VirtualDesktopService: Switched to desktop {desktop.GetId()}");
             return true;

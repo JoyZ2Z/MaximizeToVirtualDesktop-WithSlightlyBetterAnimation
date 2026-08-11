@@ -175,7 +175,7 @@ internal sealed class FullScreenManager
         }
 
         // 7. Switch to the new desktop (window is already maximized — no flicker)
-        if (!_vds.SwitchToDesktop(tempDesktop))
+        if (!_vds.SwitchToDesktop(tempDesktop, _settings.SwitchMode))
         {
             // Rollback: restore window, move windows back, remove desktop
             Trace.WriteLine("FullScreenManager: Failed to switch desktop, rolling back.");

@@ -252,18 +252,18 @@ internal sealed class TrayApplication : Form
         _manager.PinToggle(hwnd);
     }
 
+    private void SetSwitchMode(DesktopSwitchMode mode)
+    {
+        _settings.SwitchMode = mode;
+        _settings.Save();
+        Trace.WriteLine($"TrayApplication: Switch mode set to {mode}.");
+    }
+
     private ContextMenuStrip BuildContextMenu()
     {
         var menu = new ContextMenuStrip();
 
         var statusItem = new ToolStripMenuItem("No windows tracked") { Enabled = false };
-        menu.Opening += (_, _) =>
-        {
-            var count = _tracker.Count;
-            statusItem.Text = count == 0
-                ? "No windows tracked"
-                : $"{count} window(s) on virtual desktops";
-        };
         menu.Items.Add(statusItem);
         menu.Items.Add(new ToolStripSeparator());
 
@@ -272,6 +272,37 @@ internal sealed class TrayApplication : Form
             _manager.RestoreAll();
         });
         menu.Items.Add(restoreAllItem);
+
+        menu.Items.Add(new ToolStripSeparator());
+
+        // --- Switch Mode submenu ---
+        var switchModeMenu = new ToolStripMenuItem("Switch Mode");
+        var modeAtomic = new ToolStripMenuItem("Atomic (smoothest)",
+            null, (_, _) => SetSwitchMode(DesktopSwitchMode.Atomic));
+        var modeAnimated = new ToolStripMenuItem("Animated",
+            null, (_, _) => SetSwitchMode(DesktopSwitchMode.Animated));
+        var modeInstant = new ToolStripMenuItem("Instant",
+            null, (_, _) => SetSwitchMode(DesktopSwitchMode.Instant));
+        switchModeMenu.DropDownItems.Add(modeAtomic);
+        switchModeMenu.DropDownItems.Add(modeAnimated);
+        switchModeMenu.DropDownItems.Add(modeInstant);
+        switchModeMenu.DropDownOpening += (_, _) =>
+        {
+            modeAtomic.Checked = _settings.SwitchMode == DesktopSwitchMode.Atomic;
+            modeAnimated.Checked = _settings.SwitchMode == DesktopSwitchMode.Animated;
+            modeInstant.Checked = _settings.SwitchMode == DesktopSwitchMode.Instant;
+        };
+        menu.Items.Add(switchModeMenu);
+
+        // --- Shift Click toggle ---
+        var shiftClickItem = new ToolStripMenuItem("Double-click → Virtual Desktop", null, (_, _) =>
+        {
+            _settings.InvertShiftClick = !_settings.InvertShiftClick;
+            _settings.Save();
+            _trayIcon.Text = BuildTooltipText();
+        });
+        shiftClickItem.CheckOnClick = true;
+        menu.Items.Add(shiftClickItem);
 
         menu.Items.Add(new ToolStripSeparator());
 
@@ -302,6 +333,19 @@ internal sealed class TrayApplication : Form
             Application.Exit();
         });
         menu.Items.Add(exitItem);
+
+        menu.Opening += (_, _) =>
+        {
+            var count = _tracker.Count;
+            statusItem.Text = count == 0
+                ? "No windows tracked"
+                : $"{count} window(s) on virtual desktops";
+
+            shiftClickItem.Checked = _settings.InvertShiftClick;
+            shiftClickItem.Text = _settings.InvertShiftClick
+                ? "Double-click → Virtual Desktop"
+                : "Shift+Double-click → Virtual Desktop";
+        };
 
         return menu;
     }

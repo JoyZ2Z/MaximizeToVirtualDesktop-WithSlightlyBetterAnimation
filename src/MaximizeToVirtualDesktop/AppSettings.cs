@@ -5,6 +5,19 @@ using MaximizeToVirtualDesktop.Interop;
 namespace MaximizeToVirtualDesktop;
 
 /// <summary>
+/// Desktop switch animation mode.
+/// </summary>
+internal enum DesktopSwitchMode
+{
+    /// <summary>24H2 atomic switch — smoothest, no flicker.</summary>
+    Atomic = 0,
+    /// <summary>Slide animation — smoother than instant, slight transition.</summary>
+    Animated = 1,
+    /// <summary>Instant switch — fastest, may flicker on some apps.</summary>
+    Instant = 2,
+}
+
+/// <summary>
 /// Persists user-configurable settings.
 /// File lives in %LOCALAPPDATA%\MaximizeToVirtualDesktop\settings.json.
 /// </summary>
@@ -38,6 +51,11 @@ internal sealed class AppSettings
     /// When true, show on-screen popup notifications when switching windows to/from virtual desktops.
     /// </summary>
     public bool ShowSwitchPopup { get; set; } = true;
+
+    /// <summary>
+    /// Desktop switch animation: Atomic (24H2, smoothest), Animated (slide), or Instant.
+    /// </summary>
+    public DesktopSwitchMode SwitchMode { get; set; } = DesktopSwitchMode.Animated;
 
     public static AppSettings Load()
     {
