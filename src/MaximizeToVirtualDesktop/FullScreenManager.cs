@@ -158,11 +158,32 @@ internal sealed class FullScreenManager
             }
         }
 
-        // 6. Switch to the new desktop
+        // 6. Maximize the window (invisible — user is still on original desktop)
+        bool elevated = NativeMethods.IsWindowElevated(hwnd);
+        if (elevated)
+        {
+            Trace.WriteLine("FullScreenManager: Window is elevated, cannot maximize via UIPI.");
+            if (_settings.ShowSwitchPopup)
+            {
+                NotificationOverlay.ShowNotification("⚠ Elevated Window",
+                    "Press Win+↑ to maximize", hwnd);
+            }
+        }
+        else
+        {
+            NativeMethods.ShowWindow(hwnd, NativeMethods.SW_MAXIMIZE);
+        }
+
+        // 7. Switch to the new desktop (window is already maximized — no flicker)
         if (!_vds.SwitchToDesktop(tempDesktop))
         {
-            // Rollback: move all windows back, remove desktop
+            // Rollback: restore window, move windows back, remove desktop
             Trace.WriteLine("FullScreenManager: Failed to switch desktop, rolling back.");
+            if (!elevated && NativeMethods.IsWindow(hwnd))
+            {
+                var rollbackPlacement = originalPlacement;
+                NativeMethods.SetWindowPlacement(hwnd, ref rollbackPlacement);
+            }
             var origDesktop = _vds.FindDesktop(originalDesktopId.Value);
             try
             {
@@ -181,22 +202,6 @@ internal sealed class FullScreenManager
             _vds.RemoveDesktop(tempDesktop);
             Marshal.ReleaseComObject(tempDesktop);
             return;
-        }
-
-        // 7. Maximize the primary window (no animation delay needed)
-        bool elevated = NativeMethods.IsWindowElevated(hwnd);
-        if (elevated)
-        {
-            Trace.WriteLine("FullScreenManager: Window is elevated, cannot maximize via UIPI.");
-            if (_settings.ShowSwitchPopup)
-            {
-                NotificationOverlay.ShowNotification("⚠ Elevated Window",
-                    "Press Win+↑ to maximize", hwnd);
-            }
-        }
-        else
-        {
-            NativeMethods.ShowWindow(hwnd, NativeMethods.SW_MAXIMIZE);
         }
         NativeMethods.SetForegroundWindow(hwnd);
 
