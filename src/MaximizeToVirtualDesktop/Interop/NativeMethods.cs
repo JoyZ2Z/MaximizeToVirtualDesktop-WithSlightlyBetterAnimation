@@ -85,8 +85,7 @@ internal static partial class NativeMethods
     [DllImport("user32.dll")]
     internal static extern IntPtr SetFocus(IntPtr hWnd);
 
-    [DllImport("user32.dll")]
-    internal static extern IntPtr GetCapture();
+    internal const int VK_LBUTTON = 0x01;
 
     internal const int VK_MENU = 0x12;
     internal const int KEYEVENTF_KEYUP = 0x0002;

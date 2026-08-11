@@ -74,10 +74,10 @@ internal sealed class MaximizeButtonHook : IDisposable
                 {
                     if (IsClickOnMaximizeButton(hwnd, hookStruct.pt))
                     {
-                        var topLevel = GetTopLevelWindow(hwnd);
-                        if (topLevel != IntPtr.Zero)
+                        var buttonTopLevel = GetTopLevelWindow(hwnd);
+                        if (buttonTopLevel != IntPtr.Zero)
                         {
-                            PostToggle(topLevel);
+                            PostToggle(buttonTopLevel);
                             return (IntPtr)1;
                         }
                     }
@@ -86,27 +86,28 @@ internal sealed class MaximizeButtonHook : IDisposable
                     var nowTicks = DateTime.UtcNow.Ticks;
                     var elapsedMs = (nowTicks - _lastClickTicks) / TimeSpan.TicksPerMillisecond;
 
+                    // Compare top-level windows — WindowFromPoint may return different
+                    // child hwnds for UWP/Electron layered windows.
+                    var topLevel = GetTopLevelWindow(hwnd);
+                    var lastTopLevel = _lastClickHwnd != IntPtr.Zero
+                        ? GetTopLevelWindow(_lastClickHwnd) : IntPtr.Zero;
+
                     if (elapsedMs > 0 && elapsedMs < DoubleClickTimeMs &&
                         Math.Abs(hookStruct.pt.X - _lastClickX) < DoubleClickWidth &&
                         Math.Abs(hookStruct.pt.Y - _lastClickY) < DoubleClickHeight &&
-                        hwnd == _lastClickHwnd)
+                        topLevel != IntPtr.Zero && topLevel == lastTopLevel)
                     {
                         // Second click — verify it's on the caption bar
                         if (IsClickOnCaption(hwnd, hookStruct.pt))
                         {
-                            _lastClickTicks = 0; // reset
-                            var topLevel = GetTopLevelWindow(hwnd);
-                            if (topLevel != IntPtr.Zero)
-                            {
-                                PostToggle(topLevel);
-                                // Suppress BOTH clicks of the double-click
-                                return (IntPtr)1;
-                            }
+                            _lastClickTicks = 0;
+                            PostToggle(topLevel);
+                            return (IntPtr)1;
                         }
                     }
                     else
                     {
-                        // First click — record for potential double-click detection
+                        // First click — record top-level window
                         _lastClickTicks = nowTicks;
                         _lastClickX = hookStruct.pt.X;
                         _lastClickY = hookStruct.pt.Y;
