@@ -73,6 +73,12 @@ internal static partial class NativeMethods
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool IsIconic(IntPtr hWnd);
 
+    [DllImport("user32.dll")]
+    internal static extern uint GetDoubleClickTime();
+
+    [DllImport("user32.dll")]
+    internal static extern int GetSystemMetrics(int nIndex);
+
     [DllImport("kernel32.dll")]
     internal static extern uint GetCurrentThreadId();
 
@@ -196,6 +202,12 @@ internal static partial class NativeMethods
     internal static readonly IntPtr SC_MAXIMIZE = new IntPtr(0xF030);
 
     internal const int HTMAXBUTTON = 9;
+    internal const int HTCAPTION = 2;
+    internal const int HTSYSMENU = 3;
+    internal const int HTMENU = 5;
+
+    internal const int SM_CXDOUBLECLK = 36;
+    internal const int SM_CYDOUBLECLK = 37;
 
     internal const int WH_MOUSE_LL = 14;
     internal const int HC_ACTION = 0;
