@@ -228,10 +228,11 @@ internal sealed class FullScreenManager
         // Untrack will be performed after successful restore
 
         var origDesktop = _vds.FindDesktop(entry.OriginalDesktopId);
+        bool isDragging = NativeMethods.GetCapture() == hwnd;
         try
         {
-            // Restore window placement (skip if keeping minimized)
-            if (!keepMinimized && NativeMethods.IsWindow(hwnd))
+            // Restore window placement — skip during drag to avoid breaking the mouse capture
+            if (!keepMinimized && !isDragging && NativeMethods.IsWindow(hwnd))
             {
                 var placement = entry.OriginalPlacement;
                 NativeMethods.SetWindowPlacement(hwnd, ref placement);
