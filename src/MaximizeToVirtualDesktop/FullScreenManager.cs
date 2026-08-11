@@ -227,12 +227,18 @@ internal sealed class FullScreenManager
 
         // Untrack will be performed after successful restore
 
+        // During title-bar drag, skip entirely — OnMoveSizeEnd handles cleanup after release
+        if (!keepMinimized && NativeMethods.GetCapture() == hwnd)
+        {
+            Trace.WriteLine($"FullScreenManager: Window {hwnd} is being dragged, deferring restore.");
+            return;
+        }
+
         var origDesktop = _vds.FindDesktop(entry.OriginalDesktopId);
-        bool isDragging = NativeMethods.GetCapture() == hwnd;
         try
         {
             // Restore window placement — skip during drag to avoid breaking the mouse capture
-            if (!keepMinimized && !isDragging && NativeMethods.IsWindow(hwnd))
+            if (!keepMinimized && NativeMethods.IsWindow(hwnd))
             {
                 var placement = entry.OriginalPlacement;
                 NativeMethods.SetWindowPlacement(hwnd, ref placement);

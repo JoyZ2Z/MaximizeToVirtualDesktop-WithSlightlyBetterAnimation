@@ -185,6 +185,7 @@ internal sealed class WindowMonitor : IDisposable
         Trace.WriteLine($"WindowMonitor: MoveSizeEnd: tracked window {hwnd} showCmd={placement.showCmd}.");
         if (placement.showCmd != NativeMethods.SW_MAXIMIZE && !NativeMethods.IsIconic(hwnd))
         {
+            if (NativeMethods.GetCapture() == hwnd) return; // still dragging
             Trace.WriteLine($"WindowMonitor: Tracked window {hwnd} un-maximized via move/size, restoring.");
             await Task.Delay(100);
             MarshalToUiThread(() => _manager.Restore(hwnd));
