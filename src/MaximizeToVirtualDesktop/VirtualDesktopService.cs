@@ -195,7 +195,7 @@ internal sealed class VirtualDesktopService : IDisposable
 
     public bool SwitchToDesktop(IVirtualDesktop desktop)
     {
-        return SwitchToDesktop(desktop, DesktopSwitchMode.Instant);
+        return SwitchToDesktop(desktop, DesktopSwitchMode.Immediate);
     }
 
     public bool SwitchToDesktop(IVirtualDesktop desktop, DesktopSwitchMode mode)
@@ -224,13 +224,10 @@ internal sealed class VirtualDesktopService : IDisposable
 
             switch (mode)
             {
-                case DesktopSwitchMode.Atomic:
-                    _managerInternal!.SwitchDesktopAtomic(desktop);
-                    break;
                 case DesktopSwitchMode.Animated:
                     _managerInternal!.SwitchDesktopWithAnimation(desktop);
                     break;
-                default:
+                default: // Immediate
                     _managerInternal!.SwitchDesktop(desktop);
                     break;
             }

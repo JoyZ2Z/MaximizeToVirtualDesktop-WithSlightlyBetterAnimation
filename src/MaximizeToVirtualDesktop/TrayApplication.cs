@@ -277,20 +277,16 @@ internal sealed class TrayApplication : Form
 
         // --- Switch Mode submenu ---
         var switchModeMenu = new ToolStripMenuItem("Switch Mode");
-        var modeAtomic = new ToolStripMenuItem("Atomic (smoothest)",
-            null, (_, _) => SetSwitchMode(DesktopSwitchMode.Atomic));
-        var modeAnimated = new ToolStripMenuItem("Animated",
+        var modeAnimated = new ToolStripMenuItem("Animated (slide transition)",
             null, (_, _) => SetSwitchMode(DesktopSwitchMode.Animated));
-        var modeInstant = new ToolStripMenuItem("Instant",
-            null, (_, _) => SetSwitchMode(DesktopSwitchMode.Instant));
-        switchModeMenu.DropDownItems.Add(modeAtomic);
+        var modeImmediate = new ToolStripMenuItem("Immediate (no animation)",
+            null, (_, _) => SetSwitchMode(DesktopSwitchMode.Immediate));
         switchModeMenu.DropDownItems.Add(modeAnimated);
-        switchModeMenu.DropDownItems.Add(modeInstant);
+        switchModeMenu.DropDownItems.Add(modeImmediate);
         switchModeMenu.DropDownOpening += (_, _) =>
         {
-            modeAtomic.Checked = _settings.SwitchMode == DesktopSwitchMode.Atomic;
             modeAnimated.Checked = _settings.SwitchMode == DesktopSwitchMode.Animated;
-            modeInstant.Checked = _settings.SwitchMode == DesktopSwitchMode.Instant;
+            modeImmediate.Checked = _settings.SwitchMode == DesktopSwitchMode.Immediate;
         };
         menu.Items.Add(switchModeMenu);
 

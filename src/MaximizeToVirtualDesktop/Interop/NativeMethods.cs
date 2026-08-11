@@ -79,6 +79,15 @@ internal static partial class NativeMethods
     [DllImport("user32.dll")]
     internal static extern int GetSystemMetrics(int nIndex);
 
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter,
+        int X, int Y, int cx, int cy, uint uFlags);
+
+    internal const uint SWP_NOCOPYBITS = 0x0100;
+    internal const uint SWP_NOZORDER = 0x0004;
+    internal const uint SWP_NOACTIVATE = 0x0010;
+
     [DllImport("kernel32.dll")]
     internal static extern uint GetCurrentThreadId();
 

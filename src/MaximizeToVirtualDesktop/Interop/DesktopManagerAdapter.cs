@@ -15,7 +15,6 @@ internal abstract class DesktopManagerAdapter : IDisposable
     public abstract void MoveViewToDesktop(IApplicationView view, IVirtualDesktop desktop);
     public abstract int GetAdjacentDesktop(IVirtualDesktop from, int direction, out IVirtualDesktop desktop);
     public abstract void SwitchDesktop(IVirtualDesktop desktop);
-    public abstract void SwitchDesktopAtomic(IVirtualDesktop desktop);
     public abstract void SwitchDesktopWithAnimation(IVirtualDesktop desktop);
     public abstract void RemoveDesktop(IVirtualDesktop desktop, IVirtualDesktop fallback);
     public abstract IVirtualDesktop FindDesktop(ref Guid desktopId);
@@ -113,8 +112,6 @@ internal abstract class DesktopManagerAdapter : IDisposable
             => _com!.GetAdjacentDesktop(from, direction, out desktop);
         public override void SwitchDesktop(IVirtualDesktop desktop)
             => _com!.SwitchDesktop(desktop);
-        public override void SwitchDesktopAtomic(IVirtualDesktop desktop)
-            => _com!.SwitchDesktopAndMoveForegroundView(desktop);
         public override void SwitchDesktopWithAnimation(IVirtualDesktop desktop)
             => _com!.SwitchDesktopWithAnimation(desktop);
         public override void RemoveDesktop(IVirtualDesktop desktop, IVirtualDesktop fallback)
@@ -146,8 +143,6 @@ internal abstract class DesktopManagerAdapter : IDisposable
             => _com!.GetAdjacentDesktop(from, direction, out desktop);
         public override void SwitchDesktop(IVirtualDesktop desktop)
             => _com!.SwitchDesktop(desktop);
-        public override void SwitchDesktopAtomic(IVirtualDesktop desktop)
-            => _com!.SwitchDesktop(desktop); // Pre-24H2: fallback to instant switch
         public override void SwitchDesktopWithAnimation(IVirtualDesktop desktop)
             => _com!.SwitchDesktopWithAnimation(desktop);
         public override void RemoveDesktop(IVirtualDesktop desktop, IVirtualDesktop fallback)

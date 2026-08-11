@@ -158,26 +158,32 @@ internal sealed class FullScreenManager
             }
         }
 
-        // 6. Maximize & switch to the new desktop — strategy depends on mode
+        // 6. Restore window to normal size silently, then switch desktop, then maximize.
+        //    Use SWP_NOCOPYBITS so the restore is invisible — critical for apps where
+        //    the Windows maximize already fired (Electron, restore-from-taskbar, etc.).
         bool elevated = NativeMethods.IsWindowElevated(hwnd);
+
+        if (!elevated && NativeMethods.IsWindow(hwnd))
+        {
+            var current = NativeMethods.WINDOWPLACEMENT.Default;
+            if (NativeMethods.GetWindowPlacement(hwnd, ref current) && current.showCmd == NativeMethods.SW_MAXIMIZE)
+            {
+                var r = current.rcNormalPosition;
+                NativeMethods.SetWindowPos(hwnd, IntPtr.Zero,
+                    r.Left, r.Top, r.Right - r.Left, r.Bottom - r.Top,
+                    NativeMethods.SWP_NOCOPYBITS | NativeMethods.SWP_NOZORDER | NativeMethods.SWP_NOACTIVATE);
+                Trace.WriteLine($"FullScreenManager: Restored maximized window {hwnd} invisibly.");
+            }
+        }
 
         if (_settings.SwitchMode == DesktopSwitchMode.Animated)
         {
-            // Animated mode: mimic the hotkey behavior.
-            // Restore window to normal size first (on new desktop, invisible to user),
-            // then switch with slide animation, then maximize — same as Ctrl+Shift+Alt+X.
-            if (!elevated && NativeMethods.IsWindow(hwnd))
-            {
-                NativeMethods.ShowWindow(hwnd, (int)NativeMethods.SW_SHOWNORMAL);
-            }
-
             if (!_vds.SwitchToDesktop(tempDesktop, DesktopSwitchMode.Animated))
             {
                 RollbackSwitch(tempDesktop, originalDesktopId.Value, movedWindows, hwnd, originalPlacement, elevated);
                 return;
             }
 
-            // Maximize after animation settles (same timing as original hotkey flow)
             if (!elevated && NativeMethods.IsWindow(hwnd))
             {
                 Thread.Sleep(250);
@@ -185,16 +191,9 @@ internal sealed class FullScreenManager
             }
             NativeMethods.SetForegroundWindow(hwnd);
         }
-        else if (_settings.SwitchMode == DesktopSwitchMode.Atomic || _settings.SwitchMode == DesktopSwitchMode.Instant)
+        else // Immediate
         {
-            // Atomic / Instant mode: switch first, then maximize.
-            // Same flow as Animated, but with instant switch and minimal delay.
-            if (!elevated && NativeMethods.IsWindow(hwnd))
-            {
-                NativeMethods.ShowWindow(hwnd, (int)NativeMethods.SW_SHOWNORMAL);
-            }
-
-            if (!_vds.SwitchToDesktop(tempDesktop, _settings.SwitchMode))
+            if (!_vds.SwitchToDesktop(tempDesktop, DesktopSwitchMode.Immediate))
             {
                 RollbackSwitch(tempDesktop, originalDesktopId.Value, movedWindows, hwnd, originalPlacement, elevated);
                 return;
@@ -202,7 +201,6 @@ internal sealed class FullScreenManager
 
             if (!elevated && NativeMethods.IsWindow(hwnd))
             {
-                Thread.Sleep(50);
                 NativeMethods.ShowWindow(hwnd, NativeMethods.SW_MAXIMIZE);
             }
             NativeMethods.SetForegroundWindow(hwnd);

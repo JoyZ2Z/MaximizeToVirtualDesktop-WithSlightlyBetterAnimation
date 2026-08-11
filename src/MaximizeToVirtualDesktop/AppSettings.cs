@@ -9,12 +9,10 @@ namespace MaximizeToVirtualDesktop;
 /// </summary>
 internal enum DesktopSwitchMode
 {
-    /// <summary>24H2 atomic switch — smoothest, no flicker.</summary>
-    Atomic = 0,
-    /// <summary>Slide animation — smoother than instant, slight transition.</summary>
-    Animated = 1,
-    /// <summary>Instant switch — fastest, may flicker on some apps.</summary>
-    Instant = 2,
+    /// <summary>Animated slide — smooth transition, window slides into new desktop.</summary>
+    Animated = 0,
+    /// <summary>Immediate — no animations at all, instant desktop switch + instant maximize.</summary>
+    Immediate = 1,
 }
 
 /// <summary>
