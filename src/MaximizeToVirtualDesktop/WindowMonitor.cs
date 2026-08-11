@@ -17,11 +17,13 @@ internal sealed class WindowMonitor : IDisposable
     private readonly AppSettings _settings;
     private IntPtr _locationChangeHook;
     private IntPtr _destroyHook;
+    private IntPtr _hideHook;
     private bool _disposed;
 
     // Must be stored as fields to prevent GC collection of the delegate
     private readonly NativeMethods.WinEventProc _locationChangeProc;
     private readonly NativeMethods.WinEventProc _destroyProc;
+    private readonly NativeMethods.WinEventProc _hideProc;
     private readonly NativeMethods.WinEventProc _moveSizeEndProc;
     private IntPtr _moveSizeEndHook;
     // Track windows that have been maximized but need to wait for resize end
@@ -37,6 +39,7 @@ internal sealed class WindowMonitor : IDisposable
 
         _locationChangeProc = OnLocationChange;
         _destroyProc = OnDestroy;
+        _hideProc = OnHide;
         _moveSizeEndProc = OnMoveSizeEnd;
     }
 
@@ -63,6 +66,13 @@ internal sealed class WindowMonitor : IDisposable
             NativeMethods.EVENT_OBJECT_DESTROY,
             NativeMethods.EVENT_OBJECT_DESTROY,
             IntPtr.Zero, _destroyProc,
+            0, 0, NativeMethods.WINEVENT_OUTOFCONTEXT);
+
+        // EVENT_OBJECT_HIDE fires when a window is hidden (closed to tray, or closing)
+        _hideHook = NativeMethods.SetWinEventHook(
+            NativeMethods.EVENT_OBJECT_HIDE,
+            NativeMethods.EVENT_OBJECT_HIDE,
+            IntPtr.Zero, _hideProc,
             0, 0, NativeMethods.WINEVENT_OUTOFCONTEXT);
 
         if (_locationChangeHook == IntPtr.Zero || _destroyHook == IntPtr.Zero)
@@ -185,6 +195,16 @@ internal sealed class WindowMonitor : IDisposable
         MarshalToUiThread(() => _manager.HandleWindowDestroyed(hwnd));
     }
 
+    private void OnHide(IntPtr hWinEventHook, uint eventType, IntPtr hwnd,
+        int idObject, int idChild, uint idEventThread, uint dwmsEventTime)
+    {
+        if (idObject != NativeMethods.OBJID_WINDOW || idChild != 0) return;
+        if (!_tracker.IsTracked(hwnd)) return;
+
+        Trace.WriteLine($"WindowMonitor: Tracked window {hwnd} hidden, cleaning up.");
+        MarshalToUiThread(() => _manager.HandleWindowDestroyed(hwnd));
+    }
+
     private void MarshalToUiThread(Action action)
     {
         if (_syncControl.IsDisposed || !_syncControl.IsHandleCreated) return;
@@ -213,6 +233,11 @@ internal sealed class WindowMonitor : IDisposable
         {
             NativeMethods.UnhookWinEvent(_destroyHook);
             _destroyHook = IntPtr.Zero;
+        }
+        if (_hideHook != IntPtr.Zero)
+        {
+            NativeMethods.UnhookWinEvent(_hideHook);
+            _hideHook = IntPtr.Zero;
         }
         if (_moveSizeEndHook != IntPtr.Zero)
         {

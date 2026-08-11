@@ -209,6 +209,7 @@ internal static partial class NativeMethods
 
     internal const uint WINEVENT_OUTOFCONTEXT = 0x0000;
     internal const uint EVENT_OBJECT_DESTROY = 0x8001;
+    internal const uint EVENT_OBJECT_HIDE = 0x8003;
     internal const uint EVENT_SYSTEM_MOVESIZEEND = 0x000B;
     internal const uint EVENT_OBJECT_LOCATIONCHANGE = 0x800B;
 
