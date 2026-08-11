@@ -99,8 +99,9 @@ internal sealed class WindowMonitor : IDisposable
             {
                 if (placement.showCmd != NativeMethods.SW_MAXIMIZE)
                 {
-                    Trace.WriteLine($"WindowMonitor: Tracked window {hwnd} restored via location change.");
-                    MarshalToUiThread(() => _manager.Restore(hwnd));
+                    bool isMinimized = NativeMethods.IsIconic(hwnd);
+                    Trace.WriteLine($"WindowMonitor: Tracked window {hwnd} un-maximized (minimized={isMinimized}).");
+                    MarshalToUiThread(() => _manager.Restore(hwnd, keepMinimized: isMinimized));
                     return;
                 }
             }
@@ -143,7 +144,7 @@ internal sealed class WindowMonitor : IDisposable
                                 else
                                 {
                                     Trace.WriteLine($"WindowMonitor: Fallback detected restore for pending window {hwnd}.");
-                                    _manager.Restore(hwnd);
+                                    _manager.Restore(hwnd, keepMinimized: NativeMethods.IsIconic(hwnd));
                                 }
                             }
                         });
@@ -177,7 +178,7 @@ internal sealed class WindowMonitor : IDisposable
         var placement = NativeMethods.WINDOWPLACEMENT.Default;
         if (!NativeMethods.GetWindowPlacement(hwnd, ref placement)) return;
         Trace.WriteLine($"WindowMonitor: MoveSizeEnd: tracked window {hwnd} showCmd={placement.showCmd}.");
-        if (placement.showCmd != NativeMethods.SW_MAXIMIZE)
+        if (placement.showCmd != NativeMethods.SW_MAXIMIZE && !NativeMethods.IsIconic(hwnd))
         {
             Trace.WriteLine($"WindowMonitor: Tracked window {hwnd} un-maximized via move/size, restoring.");
             await Task.Delay(100);

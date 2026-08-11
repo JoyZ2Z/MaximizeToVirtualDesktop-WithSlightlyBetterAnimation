@@ -213,8 +213,9 @@ internal sealed class FullScreenManager
     /// <summary>
     /// Restore a tracked window: move it back to its original desktop, restore window state,
     /// switch back, and remove the temp desktop.
+    /// When <paramref name="keepMinimized"/> is true, the window stays minimized (only desktop cleanup is performed).
     /// </summary>
-    public void Restore(IntPtr hwnd)
+    public void Restore(IntPtr hwnd, bool keepMinimized = false)
     {
         var entry = _tracker.Get(hwnd);
         if (entry == null)
@@ -230,8 +231,8 @@ internal sealed class FullScreenManager
         var origDesktop = _vds.FindDesktop(entry.OriginalDesktopId);
         try
         {
-            // Restore window placement
-            if (NativeMethods.IsWindow(hwnd))
+            // Restore window placement (skip if keeping minimized)
+            if (!keepMinimized && NativeMethods.IsWindow(hwnd))
             {
                 var placement = entry.OriginalPlacement;
                 NativeMethods.SetWindowPlacement(hwnd, ref placement);
@@ -269,8 +270,8 @@ internal sealed class FullScreenManager
       
         _tracker.Untrack(hwnd);
 
-        // Set focus on the restored window
-        if (NativeMethods.IsWindow(hwnd))
+        // Set focus on the restored window (skip if minimized)
+        if (!keepMinimized && NativeMethods.IsWindow(hwnd))
         {
             NativeMethods.SetForegroundWindow(hwnd);
         }

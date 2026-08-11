@@ -69,6 +69,10 @@ internal static partial class NativeMethods
     [DllImport("user32.dll")]
     internal static extern short GetAsyncKeyState(int vKey);
 
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool IsIconic(IntPtr hWnd);
+
     [DllImport("kernel32.dll")]
     internal static extern uint GetCurrentThreadId();
 
