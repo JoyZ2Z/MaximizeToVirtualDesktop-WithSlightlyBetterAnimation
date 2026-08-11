@@ -5,14 +5,12 @@ using MaximizeToVirtualDesktop.Interop;
 namespace MaximizeToVirtualDesktop;
 
 /// <summary>
-/// Desktop switch animation mode.
+/// Desktop switch animation mode (placeholder for future options).
 /// </summary>
 internal enum DesktopSwitchMode
 {
-    /// <summary>Animated slide — smooth transition, window slides into new desktop.</summary>
-    Animated = 0,
-    /// <summary>Immediate — no animations at all, instant desktop switch + instant maximize.</summary>
-    Immediate = 1,
+    /// <summary>Immediate — no animations, instant switch + maximize.</summary>
+    Immediate = 0,
 }
 
 /// <summary>
@@ -53,7 +51,7 @@ internal sealed class AppSettings
     /// <summary>
     /// Desktop switch animation: Atomic (24H2, smoothest), Animated (slide), or Instant.
     /// </summary>
-    public DesktopSwitchMode SwitchMode { get; set; } = DesktopSwitchMode.Animated;
+    public DesktopSwitchMode SwitchMode { get; set; } = DesktopSwitchMode.Immediate;
 
     public static AppSettings Load()
     {

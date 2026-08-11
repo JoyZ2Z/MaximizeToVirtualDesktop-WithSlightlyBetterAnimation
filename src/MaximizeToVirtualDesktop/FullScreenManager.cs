@@ -158,9 +158,8 @@ internal sealed class FullScreenManager
             }
         }
 
-        // 6. Restore window to normal size silently, then switch desktop, then maximize.
-        //    Use SWP_NOCOPYBITS so the restore is invisible — critical for apps where
-        //    the Windows maximize already fired (Electron, restore-from-taskbar, etc.).
+        // 6. Restore window to normal size (window is on new desktop, invisible to user),
+        //    then switch desktop instantly, then maximize.
         bool elevated = NativeMethods.IsWindowElevated(hwnd);
 
         if (!elevated && NativeMethods.IsWindow(hwnd))
@@ -168,43 +167,24 @@ internal sealed class FullScreenManager
             var current = NativeMethods.WINDOWPLACEMENT.Default;
             if (NativeMethods.GetWindowPlacement(hwnd, ref current) && current.showCmd == NativeMethods.SW_MAXIMIZE)
             {
-                var r = current.rcNormalPosition;
-                NativeMethods.SetWindowPos(hwnd, IntPtr.Zero,
-                    r.Left, r.Top, r.Right - r.Left, r.Bottom - r.Top,
-                    NativeMethods.SWP_NOCOPYBITS | NativeMethods.SWP_NOZORDER | NativeMethods.SWP_NOACTIVATE);
-                Trace.WriteLine($"FullScreenManager: Restored maximized window {hwnd} invisibly.");
+                // Window was maximized by Windows before we got control (Electron, fallback path).
+                // Restore to normal — invisible since window is already on the new desktop.
+                NativeMethods.ShowWindow(hwnd, (int)NativeMethods.SW_SHOWNORMAL);
+                Trace.WriteLine($"FullScreenManager: Restored maximized window {hwnd} on new desktop.");
             }
         }
 
-        if (_settings.SwitchMode == DesktopSwitchMode.Animated)
+        if (!_vds.SwitchToDesktop(tempDesktop))
         {
-            if (!_vds.SwitchToDesktop(tempDesktop, DesktopSwitchMode.Animated))
-            {
-                RollbackSwitch(tempDesktop, originalDesktopId.Value, movedWindows, hwnd, originalPlacement, elevated);
-                return;
-            }
-
-            if (!elevated && NativeMethods.IsWindow(hwnd))
-            {
-                Thread.Sleep(250);
-                NativeMethods.ShowWindow(hwnd, NativeMethods.SW_MAXIMIZE);
-            }
-            NativeMethods.SetForegroundWindow(hwnd);
+            RollbackSwitch(tempDesktop, originalDesktopId.Value, movedWindows, hwnd, originalPlacement, elevated);
+            return;
         }
-        else // Immediate
+
+        if (!elevated && NativeMethods.IsWindow(hwnd))
         {
-            if (!_vds.SwitchToDesktop(tempDesktop, DesktopSwitchMode.Immediate))
-            {
-                RollbackSwitch(tempDesktop, originalDesktopId.Value, movedWindows, hwnd, originalPlacement, elevated);
-                return;
-            }
-
-            if (!elevated && NativeMethods.IsWindow(hwnd))
-            {
-                NativeMethods.ShowWindow(hwnd, NativeMethods.SW_MAXIMIZE);
-            }
-            NativeMethods.SetForegroundWindow(hwnd);
+            NativeMethods.ShowWindow(hwnd, NativeMethods.SW_MAXIMIZE);
         }
+        NativeMethods.SetForegroundWindow(hwnd);
 
         // 7. Track the window
         _tracker.Track(hwnd, originalDesktopId.Value, tempDesktopId.Value, tempDesktop, processName, originalPlacement);

@@ -127,7 +127,7 @@ internal sealed class WindowMonitor : IDisposable
                     // Schedule a fallback in case MoveSizeEnd does not fire (e.g., keyboard shortcut)
                     _ = Task.Run(async () =>
                     {
-                        await Task.Delay(200);
+                        await Task.Delay(50);
                         // Marshal the check/remove back onto the UI thread
                         MarshalToUiThread(() =>
                         {
