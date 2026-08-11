@@ -82,6 +82,12 @@ internal static partial class NativeMethods
     [DllImport("user32.dll")]
     internal static extern int GetWindowLong(IntPtr hWnd, int nIndex);
 
+    [DllImport("user32.dll")]
+    internal static extern IntPtr SetFocus(IntPtr hWnd);
+
+    [DllImport("dwmapi.dll")]
+    internal static extern int DwmFlush();
+
     internal const int GWL_EXSTYLE = -20;
     internal const int WS_EX_TOPMOST = 0x00000008;
 

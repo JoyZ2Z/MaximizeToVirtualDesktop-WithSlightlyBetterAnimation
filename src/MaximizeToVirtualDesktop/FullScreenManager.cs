@@ -161,7 +161,6 @@ internal sealed class FullScreenManager
         }
 
         // 6. Restore → switch → maximize, same flow for all paths.
-        //    Keep window topmost during switch to prevent wallpaper/theme flash.
         bool elevated = NativeMethods.IsWindowElevated(hwnd);
         const int HWND_TOPMOST = -1;
         const int HWND_NOTOPMOST = -2;
@@ -173,10 +172,11 @@ internal sealed class FullScreenManager
                 NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
         }
 
-        // Restore to normal size if maximized (invisible — window is on the new desktop)
+        // Restore to normal size, then wait for DWM to finish compositing
         if (!elevated && NativeMethods.IsWindow(hwnd))
         {
             NativeMethods.ShowWindow(hwnd, (int)NativeMethods.SW_SHOWNORMAL);
+            NativeMethods.DwmFlush();
         }
 
         if (!_vds.SwitchToDesktop(tempDesktop))
@@ -193,17 +193,19 @@ internal sealed class FullScreenManager
             NativeMethods.ShowWindow(hwnd, NativeMethods.SW_MAXIMIZE);
         }
 
-        // Restore focus — call twice with delay to ensure stickiness
-        NativeMethods.SetForegroundWindow(hwnd);
-        _ = Task.Run(async () =>
+        // Restore focus using AttachThreadInput for reliability
+        var thisThread = NativeMethods.GetCurrentThreadId();
+        var targetThread = NativeMethods.GetWindowThreadProcessId(hwnd, out _);
+        if (targetThread != 0 && targetThread != thisThread)
         {
-            await Task.Delay(100);
-            if (!_syncControl.IsDisposed && _syncControl.IsHandleCreated)
-            {
-                try { _syncControl.BeginInvoke(() => { if (NativeMethods.IsWindow(hwnd)) NativeMethods.SetForegroundWindow(hwnd); }); }
-                catch (ObjectDisposedException) { }
-            }
-        });
+            NativeMethods.AttachThreadInput(thisThread, targetThread, true);
+        }
+        NativeMethods.SetForegroundWindow(hwnd);
+        NativeMethods.SetFocus(hwnd);
+        if (targetThread != 0 && targetThread != thisThread)
+        {
+            NativeMethods.AttachThreadInput(thisThread, targetThread, false);
+        }
 
         if (!wasTopmost)
         {
