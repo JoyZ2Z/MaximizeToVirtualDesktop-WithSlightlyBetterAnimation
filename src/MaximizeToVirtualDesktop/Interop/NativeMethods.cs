@@ -88,6 +88,10 @@ internal static partial class NativeMethods
     [DllImport("dwmapi.dll")]
     internal static extern int DwmFlush();
 
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool LockWindowUpdate(IntPtr hWndLock);
+
     internal const int GWL_EXSTYLE = -20;
     internal const int WS_EX_TOPMOST = 0x00000008;
 

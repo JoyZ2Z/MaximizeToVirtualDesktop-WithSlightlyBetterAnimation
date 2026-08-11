@@ -160,58 +160,37 @@ internal sealed class FullScreenManager
             }
         }
 
-        // 6. Restore → switch → maximize, same flow for all paths.
+        // 6. Lock screen to suppress all drawing during transition,
+        //    restore → switch → maximize atomically, then unlock.
         bool elevated = NativeMethods.IsWindowElevated(hwnd);
-        const int HWND_TOPMOST = -1;
-        const int HWND_NOTOPMOST = -2;
 
-        bool wasTopmost = (NativeMethods.GetWindowLong(hwnd, NativeMethods.GWL_EXSTYLE) & NativeMethods.WS_EX_TOPMOST) != 0;
-        if (!wasTopmost)
+        NativeMethods.LockWindowUpdate(IntPtr.Zero);
+        try
         {
-            NativeMethods.SetWindowPos(hwnd, (IntPtr)HWND_TOPMOST, 0, 0, 0, 0,
-                NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
+            if (!elevated && NativeMethods.IsWindow(hwnd))
+            {
+                NativeMethods.ShowWindow(hwnd, (int)NativeMethods.SW_SHOWNORMAL);
+            }
+
+            if (!_vds.SwitchToDesktop(tempDesktop))
+            {
+                NativeMethods.LockWindowUpdate(IntPtr.Zero); // unlock before rollback
+                RollbackSwitch(tempDesktop, originalDesktopId.Value, movedWindows, hwnd, originalPlacement, elevated);
+                return;
+            }
+
+            if (!elevated && NativeMethods.IsWindow(hwnd))
+            {
+                NativeMethods.ShowWindow(hwnd, NativeMethods.SW_MAXIMIZE);
+            }
         }
-
-        // Restore to normal size, then wait for DWM to finish compositing
-        if (!elevated && NativeMethods.IsWindow(hwnd))
+        finally
         {
-            NativeMethods.ShowWindow(hwnd, (int)NativeMethods.SW_SHOWNORMAL);
-            NativeMethods.DwmFlush();
-        }
-
-        if (!_vds.SwitchToDesktop(tempDesktop))
-        {
-            if (!wasTopmost)
-                NativeMethods.SetWindowPos(hwnd, (IntPtr)HWND_NOTOPMOST, 0, 0, 0, 0,
-                    NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
-            RollbackSwitch(tempDesktop, originalDesktopId.Value, movedWindows, hwnd, originalPlacement, elevated);
-            return;
-        }
-
-        if (!elevated && NativeMethods.IsWindow(hwnd))
-        {
-            NativeMethods.ShowWindow(hwnd, NativeMethods.SW_MAXIMIZE);
+            NativeMethods.LockWindowUpdate(IntPtr.Zero);
         }
 
-        // Restore focus using AttachThreadInput for reliability
-        var thisThread = NativeMethods.GetCurrentThreadId();
-        var targetThread = NativeMethods.GetWindowThreadProcessId(hwnd, out _);
-        if (targetThread != 0 && targetThread != thisThread)
-        {
-            NativeMethods.AttachThreadInput(thisThread, targetThread, true);
-        }
-        NativeMethods.SetForegroundWindow(hwnd);
-        NativeMethods.SetFocus(hwnd);
-        if (targetThread != 0 && targetThread != thisThread)
-        {
-            NativeMethods.AttachThreadInput(thisThread, targetThread, false);
-        }
-
-        if (!wasTopmost)
-        {
-            NativeMethods.SetWindowPos(hwnd, (IntPtr)HWND_NOTOPMOST, 0, 0, 0, 0,
-                NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
-        }
+        // Retry focus — Electron/multi-process apps need multiple attempts
+        ScheduleFocusRetry(hwnd, 3);
 
         // 7. Track the window
         _tracker.Track(hwnd, originalDesktopId.Value, tempDesktopId.Value, tempDesktop, processName, originalPlacement);
@@ -221,6 +200,35 @@ internal sealed class FullScreenManager
             NotificationOverlay.ShowNotification("→ Virtual Desktop", processName ?? "", hwnd);
         }
         Trace.WriteLine($"FullScreenManager: Successfully moved window to desktop {tempDesktopId}");
+    }
+
+    /// <summary>
+    /// Retry SetForegroundWindow multiple times with delays — needed for multi-process apps (Electron etc.).
+    /// </summary>
+    private void ScheduleFocusRetry(IntPtr hwnd, int attempts)
+    {
+        _ = Task.Run(async () =>
+        {
+            for (int i = 0; i < attempts; i++)
+            {
+                await Task.Delay(80);
+                if (!_syncControl.IsDisposed && _syncControl.IsHandleCreated)
+                {
+                    try
+                    {
+                        _syncControl.BeginInvoke(() =>
+                        {
+                            if (NativeMethods.IsWindow(hwnd))
+                            {
+                                NativeMethods.SetForegroundWindow(hwnd);
+                                NativeMethods.SetFocus(hwnd);
+                            }
+                        });
+                    }
+                    catch (ObjectDisposedException) { break; }
+                }
+            }
+        });
     }
 
     /// <summary>
@@ -291,22 +299,17 @@ internal sealed class FullScreenManager
                 _vds.MoveWindowToDesktop(hwnd, origDesktop);
             }
 
-            // Switch back to original desktop — keep window topmost to prevent theme flash
+            // Switch back to original desktop — lock screen to prevent flash
             if (origDesktop != null)
             {
-                const int HWND_TOPMOST_R = -1;
-                const int HWND_NOTOPMOST_R = -2;
-                bool wasTopmostR = (NativeMethods.GetWindowLong(hwnd, NativeMethods.GWL_EXSTYLE) & NativeMethods.WS_EX_TOPMOST) != 0;
-                if (!wasTopmostR)
+                NativeMethods.LockWindowUpdate(IntPtr.Zero);
+                try
                 {
-                    NativeMethods.SetWindowPos(hwnd, (IntPtr)HWND_TOPMOST_R, 0, 0, 0, 0,
-                        NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
+                    _vds.SwitchToDesktop(origDesktop);
                 }
-                _vds.SwitchToDesktop(origDesktop);
-                if (!wasTopmostR)
+                finally
                 {
-                    NativeMethods.SetWindowPos(hwnd, (IntPtr)HWND_NOTOPMOST_R, 0, 0, 0, 0,
-                        NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
+                    NativeMethods.LockWindowUpdate(IntPtr.Zero);
                 }
             }
             else
@@ -332,6 +335,7 @@ internal sealed class FullScreenManager
         if (!keepMinimized && NativeMethods.IsWindow(hwnd))
         {
             NativeMethods.SetForegroundWindow(hwnd);
+            ScheduleFocusRetry(hwnd, 2);
         }
 
         if (_settings.ShowSwitchPopup)
