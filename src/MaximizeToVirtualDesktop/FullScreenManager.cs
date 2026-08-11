@@ -13,16 +13,18 @@ internal sealed class FullScreenManager
     private readonly VirtualDesktopService _vds;
     private readonly FullScreenTracker _tracker;
     private readonly AppSettings _settings;
+    private readonly Control _syncControl;
     private readonly HashSet<IntPtr> _inFlight = new();
     // Track temp desktop COM refs that have already been released to prevent double-release.
     // Multiple tracked windows may share the same TempDesktop COM pointer.
     private readonly HashSet<Guid> _releasedDesktops = new();
 
-    public FullScreenManager(VirtualDesktopService vds, FullScreenTracker tracker, AppSettings settings)
+    public FullScreenManager(VirtualDesktopService vds, FullScreenTracker tracker, AppSettings settings, Control syncControl)
     {
         _vds = vds;
         _tracker = tracker;
         _settings = settings;
+        _syncControl = syncControl;
     }
 
     /// <summary>
@@ -158,9 +160,8 @@ internal sealed class FullScreenManager
             }
         }
 
-        // 6. Switch to the new desktop. Keep window topmost during switch to
-        //    prevent the desktop wallpaper from flashing through for a frame.
-        //    If not maximized (hook/hotkey path), maximize after switching.
+        // 6. Restore → switch → maximize, same flow for all paths.
+        //    Keep window topmost during switch to prevent wallpaper/theme flash.
         bool elevated = NativeMethods.IsWindowElevated(hwnd);
         const int HWND_TOPMOST = -1;
         const int HWND_NOTOPMOST = -2;
@@ -170,6 +171,12 @@ internal sealed class FullScreenManager
         {
             NativeMethods.SetWindowPos(hwnd, (IntPtr)HWND_TOPMOST, 0, 0, 0, 0,
                 NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
+        }
+
+        // Restore to normal size if maximized (invisible — window is on the new desktop)
+        if (!elevated && NativeMethods.IsWindow(hwnd))
+        {
+            NativeMethods.ShowWindow(hwnd, (int)NativeMethods.SW_SHOWNORMAL);
         }
 
         if (!_vds.SwitchToDesktop(tempDesktop))
@@ -183,17 +190,21 @@ internal sealed class FullScreenManager
 
         if (!elevated && NativeMethods.IsWindow(hwnd))
         {
-            var current = NativeMethods.WINDOWPLACEMENT.Default;
-            bool alreadyMaximized = NativeMethods.GetWindowPlacement(hwnd, ref current)
-                && current.showCmd == NativeMethods.SW_MAXIMIZE;
-            if (!alreadyMaximized)
-            {
-                NativeMethods.ShowWindow(hwnd, NativeMethods.SW_MAXIMIZE);
-            }
+            NativeMethods.ShowWindow(hwnd, NativeMethods.SW_MAXIMIZE);
         }
-        NativeMethods.SetForegroundWindow(hwnd);
 
-        // Remove topmost now that switch is complete
+        // Restore focus — call twice with delay to ensure stickiness
+        NativeMethods.SetForegroundWindow(hwnd);
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(100);
+            if (!_syncControl.IsDisposed && _syncControl.IsHandleCreated)
+            {
+                try { _syncControl.BeginInvoke(() => { if (NativeMethods.IsWindow(hwnd)) NativeMethods.SetForegroundWindow(hwnd); }); }
+                catch (ObjectDisposedException) { }
+            }
+        });
+
         if (!wasTopmost)
         {
             NativeMethods.SetWindowPos(hwnd, (IntPtr)HWND_NOTOPMOST, 0, 0, 0, 0,
@@ -278,10 +289,23 @@ internal sealed class FullScreenManager
                 _vds.MoveWindowToDesktop(hwnd, origDesktop);
             }
 
-            // Switch back to original desktop
+            // Switch back to original desktop — keep window topmost to prevent theme flash
             if (origDesktop != null)
             {
+                const int HWND_TOPMOST_R = -1;
+                const int HWND_NOTOPMOST_R = -2;
+                bool wasTopmostR = (NativeMethods.GetWindowLong(hwnd, NativeMethods.GWL_EXSTYLE) & NativeMethods.WS_EX_TOPMOST) != 0;
+                if (!wasTopmostR)
+                {
+                    NativeMethods.SetWindowPos(hwnd, (IntPtr)HWND_TOPMOST_R, 0, 0, 0, 0,
+                        NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
+                }
                 _vds.SwitchToDesktop(origDesktop);
+                if (!wasTopmostR)
+                {
+                    NativeMethods.SetWindowPos(hwnd, (IntPtr)HWND_NOTOPMOST_R, 0, 0, 0, 0,
+                        NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
+                }
             }
             else
             {
