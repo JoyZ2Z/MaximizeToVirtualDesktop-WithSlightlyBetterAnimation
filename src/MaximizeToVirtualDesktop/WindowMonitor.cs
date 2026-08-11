@@ -178,7 +178,7 @@ internal sealed class WindowMonitor : IDisposable
         }
     }
 
-    private async void OnMoveSizeEnd(IntPtr hWinEventHook, uint eventType, IntPtr hwnd,
+    private void OnMoveSizeEnd(IntPtr hWinEventHook, uint eventType, IntPtr hwnd,
         int idObject, int idChild, uint idEventThread, uint dwmsEventTime)
     {
         // Only care about top-level window changes (OBJID_WINDOW)
@@ -204,9 +204,17 @@ internal sealed class WindowMonitor : IDisposable
         Trace.WriteLine($"WindowMonitor: MoveSizeEnd: tracked window {hwnd} showCmd={placement.showCmd}.");
         if (placement.showCmd != NativeMethods.SW_MAXIMIZE && !NativeMethods.IsIconic(hwnd))
         {
-            Trace.WriteLine($"WindowMonitor: Tracked window {hwnd} un-maximized via move/size, restoring.");
-            await Task.Delay(100);
-            MarshalToUiThread(() => _manager.Restore(hwnd));
+            // Use same debounce as OnLocationChange to avoid tripping during long drags
+            _restoreDebounceCts?.Cancel();
+            _restoreDebounceCts = new CancellationTokenSource();
+            var token = _restoreDebounceCts.Token;
+            var capturedHwnd = hwnd;
+            _ = Task.Run(async () =>
+            {
+                try { await Task.Delay(200, token); }
+                catch (OperationCanceledException) { return; }
+                MarshalToUiThread(() => _manager.Restore(capturedHwnd));
+            });
         }
     }
 

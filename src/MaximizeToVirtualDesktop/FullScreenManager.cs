@@ -230,11 +230,16 @@ internal sealed class FullScreenManager
         var origDesktop = _vds.FindDesktop(entry.OriginalDesktopId);
         try
         {
-            // Restore window placement — skip during drag to avoid breaking the mouse capture
             if (!keepMinimized && NativeMethods.IsWindow(hwnd))
             {
-                var placement = entry.OriginalPlacement;
-                NativeMethods.SetWindowPlacement(hwnd, ref placement);
+                // If window was already restored by Windows (drag), keep user's position.
+                // Otherwise (double-click/restore button), reset to pre-maximize placement.
+                var cur = NativeMethods.WINDOWPLACEMENT.Default;
+                if (NativeMethods.GetWindowPlacement(hwnd, ref cur) && cur.showCmd == NativeMethods.SW_MAXIMIZE)
+                {
+                    var placement = entry.OriginalPlacement;
+                    NativeMethods.SetWindowPlacement(hwnd, ref placement);
+                }
                 NativeMethods.ShowWindow(hwnd, (int)NativeMethods.SW_SHOWNORMAL);
             }
 
