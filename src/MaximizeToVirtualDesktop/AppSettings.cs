@@ -26,9 +26,7 @@ internal enum TriggerModifier
 /// </summary>
 internal sealed class AppSettings
 {
-    private static string SettingsDirectory =>
-        Path.GetDirectoryName(Application.ExecutablePath) ?? AppContext.BaseDirectory;
-    private static string FilePath => Path.Combine(SettingsDirectory, "settings.json");
+    private static readonly string FilePath = Path.Combine(AppContext.BaseDirectory, "settings.json");
 
     public uint HotkeyModifiers { get; set; } =
         NativeMethods.MOD_CONTROL | NativeMethods.MOD_ALT | NativeMethods.MOD_SHIFT;
@@ -45,21 +43,13 @@ internal sealed class AppSettings
 
     public bool ShowSwitchPopup { get; set; } = true;
 
-    /// <summary>URL opened by the tray menu "Project Home" link.</summary>
-    public string ProjectUrl { get; set; } = "https://github.com/shanselman/MaximizeToVirtualDesktop";
-
     public DesktopSwitchMode SwitchMode { get; set; } = DesktopSwitchMode.Smooth;
 
     public static AppSettings Load()
     {
         try
         {
-            Trace.WriteLine($"AppSettings: loading from {FilePath}");
-            if (!File.Exists(FilePath))
-            {
-                Trace.WriteLine("AppSettings: file not found, using defaults.");
-                return new AppSettings();
-            }
+            if (!File.Exists(FilePath)) return new AppSettings();
             var json = File.ReadAllText(FilePath);
             return JsonSerializer.Deserialize<AppSettings>(json) ?? new AppSettings();
         }

@@ -258,11 +258,9 @@ internal sealed class TrayApplication : Form
 
         menu.Items.Add(new ToolStripSeparator());
 
-        var githubItem = new ToolStripMenuItem("Project Home", null, (_, _) =>
+        var githubItem = new ToolStripMenuItem("Original Project", null, (_, _) =>
         {
-            var url = _settings.ProjectUrl;
-            if (!string.IsNullOrWhiteSpace(url))
-                Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+            Process.Start(new ProcessStartInfo("https://github.com/shanselman/MaximizeToVirtualDesktop") { UseShellExecute = true });
         });
         menu.Items.Add(githubItem);
 
@@ -331,8 +329,8 @@ internal sealed class TrayApplication : Form
         Trace.WriteLine("TrayApplication: Settings saved and hotkeys updated.");
     }
 
-    private static string FirstRunMarker =>
-        Path.Combine(Path.GetDirectoryName(Application.ExecutablePath) ?? ".", ".firstrun");
+    private static readonly string FirstRunMarker = Path.Combine(
+        AppContext.BaseDirectory, ".firstrun");
 
     private void ShowFirstRunBalloon()
     {
