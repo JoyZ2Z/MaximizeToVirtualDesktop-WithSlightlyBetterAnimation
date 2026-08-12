@@ -69,6 +69,21 @@ internal static partial class NativeMethods
     [DllImport("user32.dll")]
     internal static extern short GetAsyncKeyState(int vKey);
 
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool IsIconic(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    internal static extern uint GetDoubleClickTime();
+
+    [DllImport("user32.dll")]
+    internal static extern int GetSystemMetrics(int nIndex);
+
+    [DllImport("user32.dll")]
+    internal static extern IntPtr SetFocus(IntPtr hWnd);
+
+    internal const int VK_LBUTTON = 0x01;
+
     [DllImport("kernel32.dll")]
     internal static extern uint GetCurrentThreadId();
 
@@ -192,6 +207,12 @@ internal static partial class NativeMethods
     internal static readonly IntPtr SC_MAXIMIZE = new IntPtr(0xF030);
 
     internal const int HTMAXBUTTON = 9;
+    internal const int HTCAPTION = 2;
+    internal const int HTSYSMENU = 3;
+    internal const int HTMENU = 5;
+
+    internal const int SM_CXDOUBLECLK = 36;
+    internal const int SM_CYDOUBLECLK = 37;
 
     internal const int WH_MOUSE_LL = 14;
     internal const int HC_ACTION = 0;
@@ -209,6 +230,7 @@ internal static partial class NativeMethods
 
     internal const uint WINEVENT_OUTOFCONTEXT = 0x0000;
     internal const uint EVENT_OBJECT_DESTROY = 0x8001;
+    internal const uint EVENT_OBJECT_HIDE = 0x8003;
     internal const uint EVENT_SYSTEM_MOVESIZEEND = 0x000B;
     internal const uint EVENT_OBJECT_LOCATIONCHANGE = 0x800B;
 

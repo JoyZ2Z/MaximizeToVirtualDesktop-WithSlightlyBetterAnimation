@@ -5,8 +5,8 @@ using MaximizeToVirtualDesktop.Interop;
 namespace MaximizeToVirtualDesktop;
 
 /// <summary>
-/// Low-level mouse hook that detects Shift+Click on a window's maximize button.
-/// Works wherever Windows 11 Snap Layouts works (apps that return HTMAXBUTTON from WM_NCHITTEST).
+/// Low-level mouse hook that intercepts maximize button clicks and title-bar double-clicks.
+/// Suppresses the Windows maximize and triggers virtual-desktop maximize instead.
 /// </summary>
 internal sealed class MaximizeButtonHook : IDisposable
 {
@@ -18,6 +18,17 @@ internal sealed class MaximizeButtonHook : IDisposable
 
     // Must be stored as a field to prevent GC collection
     private readonly NativeMethods.LowLevelHookProc _hookProc;
+
+    // Double-click tracking
+    private long _lastClickTicks;
+    private int _lastClickX;
+    private int _lastClickY;
+    private IntPtr _lastClickHwnd;
+
+    // System metrics (cached)
+    private static readonly int DoubleClickTimeMs = (int)NativeMethods.GetDoubleClickTime();
+    private static readonly int DoubleClickWidth = NativeMethods.GetSystemMetrics(NativeMethods.SM_CXDOUBLECLK);
+    private static readonly int DoubleClickHeight = NativeMethods.GetSystemMetrics(NativeMethods.SM_CYDOUBLECLK);
 
     public MaximizeButtonHook(FullScreenManager manager, Control syncControl, AppSettings settings)
     {
@@ -51,38 +62,48 @@ internal sealed class MaximizeButtonHook : IDisposable
     {
         if (nCode >= NativeMethods.HC_ACTION && wParam == (IntPtr)NativeMethods.WM_LBUTTONDOWN)
         {
-            bool shiftHeld = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_SHIFT) & 0x8000) != 0;
-            // Normal mode:   Shift+Click  → virtual desktop
-            // Inverted mode: plain Click  → virtual desktop; Shift+Click → normal maximize
-            bool triggerVirtualDesktop = _settings.InvertShiftClick ? !shiftHeld : shiftHeld;
+            if (!IsTriggerActive()) return NativeMethods.CallNextHookEx(_hookHandle, nCode, wParam, lParam);
 
-            if (triggerVirtualDesktop)
+            var hookStruct = Marshal.PtrToStructure<NativeMethods.MSLLHOOKSTRUCT>(lParam);
+            var hwnd = NativeMethods.WindowFromPoint(hookStruct.pt);
+
+            if (hwnd != IntPtr.Zero)
             {
-                var hookStruct = Marshal.PtrToStructure<NativeMethods.MSLLHOOKSTRUCT>(lParam);
-                var hwnd = NativeMethods.WindowFromPoint(hookStruct.pt);
-
-                if (hwnd != IntPtr.Zero && IsClickOnMaximizeButton(hwnd, hookStruct.pt))
+                if (IsClickOnMaximizeButton(hwnd, hookStruct.pt))
                 {
-                    // Find the top-level window (the click target might be a child)
-                    var topLevel = GetTopLevelWindow(hwnd);
-                    if (topLevel != IntPtr.Zero)
+                    var buttonTopLevel = GetTopLevelWindow(hwnd);
+                    if (buttonTopLevel != IntPtr.Zero)
                     {
-                        // Post to UI thread — COM calls cannot be made inside an input-synchronous hook
-                        try
-                        {
-                            if (!_syncControl.IsDisposed && _syncControl.IsHandleCreated)
-                            {
-                                _syncControl.BeginInvoke(() => _manager.Toggle(topLevel));
-                            }
-                        }
-                        catch (ObjectDisposedException)
-                        {
-                            // App is shutting down
-                        }
-
-                        // Suppress the click
+                        PostToggle(buttonTopLevel);
                         return (IntPtr)1;
                     }
+                }
+
+                // Title-bar double-click
+                var nowTicks = DateTime.UtcNow.Ticks;
+                var elapsedMs = (nowTicks - _lastClickTicks) / TimeSpan.TicksPerMillisecond;
+                var topLevel = GetTopLevelWindow(hwnd);
+                var lastTopLevel = _lastClickHwnd != IntPtr.Zero
+                    ? GetTopLevelWindow(_lastClickHwnd) : IntPtr.Zero;
+
+                if (elapsedMs > 0 && elapsedMs < DoubleClickTimeMs &&
+                    Math.Abs(hookStruct.pt.X - _lastClickX) < DoubleClickWidth &&
+                    Math.Abs(hookStruct.pt.Y - _lastClickY) < DoubleClickHeight &&
+                    topLevel != IntPtr.Zero && topLevel == lastTopLevel)
+                {
+                    if (IsClickOnCaption(hwnd, hookStruct.pt))
+                    {
+                        _lastClickTicks = 0;
+                        PostToggle(topLevel);
+                        return (IntPtr)1;
+                    }
+                }
+                else
+                {
+                    _lastClickTicks = nowTicks;
+                    _lastClickX = hookStruct.pt.X;
+                    _lastClickY = hookStruct.pt.Y;
+                    _lastClickHwnd = hwnd;
                 }
             }
         }
@@ -90,17 +111,54 @@ internal sealed class MaximizeButtonHook : IDisposable
         return NativeMethods.CallNextHookEx(_hookHandle, nCode, wParam, lParam);
     }
 
+    private bool IsTriggerActive()
+    {
+        bool shiftHeld = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_SHIFT) & 0x8000) != 0;
+        return _settings.InvertShiftClick ? !shiftHeld : shiftHeld;
+    }
+
+    private void PostToggle(IntPtr topLevel)
+    {
+        try
+        {
+            if (!_syncControl.IsDisposed && _syncControl.IsHandleCreated)
+            {
+                _syncControl.BeginInvoke(() => _manager.Toggle(topLevel));
+            }
+        }
+        catch (ObjectDisposedException)
+        {
+            // App is shutting down
+        }
+    }
+
     private static bool IsClickOnMaximizeButton(IntPtr hwnd, NativeMethods.POINT pt)
     {
         try
         {
-            // Use SendMessageTimeout to avoid blocking if the target window is hung.
-            // A hung window would cause Windows to silently remove our LL hook.
             IntPtr lParam = (IntPtr)((pt.Y << 16) | (pt.X & 0xFFFF));
             IntPtr result = NativeMethods.SendMessageTimeout(
                 hwnd, NativeMethods.WM_NCHITTEST, IntPtr.Zero, lParam,
                 NativeMethods.SMTO_ABORTIFHUNG, 100, out IntPtr hitResult);
             return result != IntPtr.Zero && hitResult == (IntPtr)NativeMethods.HTMAXBUTTON;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool IsClickOnCaption(IntPtr hwnd, NativeMethods.POINT pt)
+    {
+        try
+        {
+            IntPtr lParam = (IntPtr)((pt.Y << 16) | (pt.X & 0xFFFF));
+            IntPtr result = NativeMethods.SendMessageTimeout(
+                hwnd, NativeMethods.WM_NCHITTEST, IntPtr.Zero, lParam,
+                NativeMethods.SMTO_ABORTIFHUNG, 50, out IntPtr hitResult);
+            if (result == IntPtr.Zero) return false;
+            var hit = hitResult.ToInt32();
+            return hit == NativeMethods.HTCAPTION || hit == NativeMethods.HTSYSMENU || hit == NativeMethods.HTMENU;
         }
         catch
         {
