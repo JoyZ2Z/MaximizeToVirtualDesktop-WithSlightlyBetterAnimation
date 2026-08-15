@@ -63,6 +63,21 @@ internal sealed class FullScreenManager
     }
 
     /// <summary>
+    /// Maximize a window to a new virtual desktop. No-op if the window is already tracked
+    /// (use <see cref="Toggle"/> for combined behavior, or <see cref="Restore"/> to undo).
+    /// </summary>
+    public void Maximize(IntPtr hwnd)
+    {
+        if (!NativeMethods.IsWindow(hwnd)) return;
+        if (_tracker.IsTracked(hwnd))
+        {
+            Trace.WriteLine($"FullScreenManager: hwnd {hwnd} already tracked, ignoring maximize.");
+            return;
+        }
+        MaximizeToDesktop(hwnd);
+    }
+
+    /// <summary>
     /// Send a window to a new virtual desktop, maximized.
     /// Only the clicked window is moved; other windows from the same process are not affected.
     /// </summary>
@@ -361,36 +376,55 @@ internal sealed class FullScreenManager
     /// </summary>
     public void PinToggle(IntPtr hwnd)
     {
-        if (!NativeMethods.IsWindow(hwnd))
-        {
-            Trace.WriteLine($"FullScreenManager: hwnd {hwnd} is not valid, ignoring pin toggle.");
-            return;
-        }
+        if (!NativeMethods.IsWindow(hwnd)) return;
 
-        string? processName = null;
+        if (_vds.IsWindowPinned(hwnd)) Unpin(hwnd);
+        else Pin(hwnd);
+    }
+
+    /// <summary>
+    /// Pin a window to all virtual desktops. No-op if already pinned.
+    /// </summary>
+    public void Pin(IntPtr hwnd)
+    {
+        if (!NativeMethods.IsWindow(hwnd)) return;
+        if (_vds.IsWindowPinned(hwnd)) return;
+
+        string? processName = GetProcessName(hwnd);
+        if (_vds.PinWindow(hwnd))
+            NotificationOverlay.ShowNotification("📌 Pinned to All Desktops", processName ?? "", hwnd);
+        else
+            NotificationOverlay.ShowNotification("⚠ Pin Failed", processName ?? "", hwnd);
+    }
+
+    /// <summary>
+    /// Unpin a window from all virtual desktops. No-op if not pinned.
+    /// </summary>
+    public void Unpin(IntPtr hwnd)
+    {
+        if (!NativeMethods.IsWindow(hwnd)) return;
+        if (!_vds.IsWindowPinned(hwnd)) return;
+
+        string? processName = GetProcessName(hwnd);
+        if (_vds.UnpinWindow(hwnd))
+            NotificationOverlay.ShowNotification("📌 Unpinned", processName ?? "", hwnd);
+        else
+            NotificationOverlay.ShowNotification("⚠ Unpin Failed", processName ?? "", hwnd);
+    }
+
+    private static string? GetProcessName(IntPtr hwnd)
+    {
         try
         {
             NativeMethods.GetWindowThreadProcessId(hwnd, out int pid);
             using var process = System.Diagnostics.Process.GetProcessById(pid);
-            processName = !string.IsNullOrWhiteSpace(process.MainWindowTitle)
+            return !string.IsNullOrWhiteSpace(process.MainWindowTitle)
                 ? process.MainWindowTitle
                 : process.ProcessName;
         }
-        catch { }
-
-        if (_vds.IsWindowPinned(hwnd))
+        catch
         {
-            if (_vds.UnpinWindow(hwnd))
-                NotificationOverlay.ShowNotification("📌 Unpinned", processName ?? "", hwnd);
-            else
-                NotificationOverlay.ShowNotification("⚠ Unpin Failed", processName ?? "", hwnd);
-        }
-        else
-        {
-            if (_vds.PinWindow(hwnd))
-                NotificationOverlay.ShowNotification("📌 Pinned to All Desktops", processName ?? "", hwnd);
-            else
-                NotificationOverlay.ShowNotification("⚠ Pin Failed", processName ?? "", hwnd);
+            return null;
         }
     }
 

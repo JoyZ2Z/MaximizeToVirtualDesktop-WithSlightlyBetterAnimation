@@ -13,8 +13,14 @@ internal sealed class SettingsDialog : Form
     private readonly CheckBox _chkHotkeyCtrl, _chkHotkeyAlt, _chkHotkeyShift, _chkHotkeyWin;
     private readonly ComboBox _cmbHotkeyKey;
 
+    private readonly CheckBox _chkRestoreCtrl, _chkRestoreAlt, _chkRestoreShift, _chkRestoreWin;
+    private readonly ComboBox _cmbRestoreKey;
+
     private readonly CheckBox _chkPinCtrl, _chkPinAlt, _chkPinShift, _chkPinWin;
     private readonly ComboBox _cmbPinKey;
+
+    private readonly CheckBox _chkUnpinCtrl, _chkUnpinAlt, _chkUnpinShift, _chkUnpinWin;
+    private readonly ComboBox _cmbUnpinKey;
 
     private readonly CheckBox _chkAutoPinCtrl, _chkAutoPinAlt, _chkAutoPinShift, _chkAutoPinWin;
     private readonly ComboBox _cmbAutoPinKey;
@@ -59,12 +65,26 @@ internal sealed class SettingsDialog : Form
             AddHotkeyRow(grpMaximize, settings.HotkeyModifiers, settings.HotkeyKey);
         y += grpMaximize.Height + 12;
 
+        // Restore hotkey group
+        var grpRestore = new GroupBox { Text = "Restore Hotkey", Location = new Point(margin, y), Size = new Size(grpW, 72) };
+        Controls.Add(grpRestore);
+        (_chkRestoreCtrl, _chkRestoreAlt, _chkRestoreShift, _chkRestoreWin, _cmbRestoreKey) =
+            AddHotkeyRow(grpRestore, settings.RestoreHotkeyModifiers, settings.RestoreHotkeyKey);
+        y += grpRestore.Height + 12;
+
         // Pin hotkey group
         var grpPin = new GroupBox { Text = "Pin Hotkey", Location = new Point(margin, y), Size = new Size(grpW, 72) };
         Controls.Add(grpPin);
         (_chkPinCtrl, _chkPinAlt, _chkPinShift, _chkPinWin, _cmbPinKey) =
             AddHotkeyRow(grpPin, settings.PinHotkeyModifiers, settings.PinHotkeyKey);
         y += grpPin.Height + 12;
+
+        // Unpin hotkey group
+        var grpUnpin = new GroupBox { Text = "Unpin Hotkey", Location = new Point(margin, y), Size = new Size(grpW, 72) };
+        Controls.Add(grpUnpin);
+        (_chkUnpinCtrl, _chkUnpinAlt, _chkUnpinShift, _chkUnpinWin, _cmbUnpinKey) =
+            AddHotkeyRow(grpUnpin, settings.UnpinHotkeyModifiers, settings.UnpinHotkeyKey);
+        y += grpUnpin.Height + 12;
 
         // Auto-pin hotkey group
         var grpAutoPin = new GroupBox { Text = "Auto-pin Hotkey", Location = new Point(margin, y), Size = new Size(grpW, 72) };
@@ -201,11 +221,23 @@ internal sealed class SettingsDialog : Form
         _chkHotkeyWin.Checked   = false;
         _cmbHotkeyKey.SelectedIndex = Array.FindIndex(SupportedKeys, k => k.Vk == NativeMethods.VK_X);
 
+        _chkRestoreCtrl.Checked  = true;
+        _chkRestoreAlt.Checked   = true;
+        _chkRestoreShift.Checked = true;
+        _chkRestoreWin.Checked   = false;
+        _cmbRestoreKey.SelectedIndex = Array.FindIndex(SupportedKeys, k => k.Vk == NativeMethods.VK_X);
+
         _chkPinCtrl.Checked  = true;
         _chkPinAlt.Checked   = true;
         _chkPinShift.Checked = true;
         _chkPinWin.Checked   = false;
         _cmbPinKey.SelectedIndex = Array.FindIndex(SupportedKeys, k => k.Vk == NativeMethods.VK_P);
+
+        _chkUnpinCtrl.Checked  = true;
+        _chkUnpinAlt.Checked   = true;
+        _chkUnpinShift.Checked = true;
+        _chkUnpinWin.Checked   = false;
+        _cmbUnpinKey.SelectedIndex = Array.FindIndex(SupportedKeys, k => k.Vk == NativeMethods.VK_P);
 
         _chkAutoPinCtrl.Checked  = true;
         _chkAutoPinAlt.Checked   = true;
@@ -249,32 +281,59 @@ internal sealed class SettingsDialog : Form
     private string? ValidateHotkeys()
     {
         uint hotkeyMod = BuildModifiers(_chkHotkeyCtrl, _chkHotkeyAlt, _chkHotkeyShift, _chkHotkeyWin);
+        uint restoreMod = BuildModifiers(_chkRestoreCtrl, _chkRestoreAlt, _chkRestoreShift, _chkRestoreWin);
         uint pinMod    = BuildModifiers(_chkPinCtrl, _chkPinAlt, _chkPinShift, _chkPinWin);
+        uint unpinMod  = BuildModifiers(_chkUnpinCtrl, _chkUnpinAlt, _chkUnpinShift, _chkUnpinWin);
         uint autoPinMod = BuildModifiers(_chkAutoPinCtrl, _chkAutoPinAlt, _chkAutoPinShift, _chkAutoPinWin);
 
         if (hotkeyMod == 0)
             return "Maximize hotkey needs at least one modifier (Ctrl, Alt, Shift, or Win).";
+        if (restoreMod == 0)
+            return "Restore hotkey needs at least one modifier (Ctrl, Alt, Shift, or Win).";
         if (pinMod == 0)
             return "Pin hotkey needs at least one modifier (Ctrl, Alt, Shift, or Win).";
+        if (unpinMod == 0)
+            return "Unpin hotkey needs at least one modifier (Ctrl, Alt, Shift, or Win).";
         if (autoPinMod == 0)
             return "Auto-pin hotkey needs at least one modifier (Ctrl, Alt, Shift, or Win).";
         if (_cmbHotkeyKey.SelectedIndex < 0)
             return "Please select a key for the maximize hotkey.";
+        if (_cmbRestoreKey.SelectedIndex < 0)
+            return "Please select a key for the restore hotkey.";
         if (_cmbPinKey.SelectedIndex < 0)
             return "Please select a key for the pin hotkey.";
+        if (_cmbUnpinKey.SelectedIndex < 0)
+            return "Please select a key for the unpin hotkey.";
         if (_cmbAutoPinKey.SelectedIndex < 0)
             return "Please select a key for the auto-pin hotkey.";
 
         uint hotkeyVk = SupportedKeys[_cmbHotkeyKey.SelectedIndex].Vk;
+        uint restoreVk = SupportedKeys[_cmbRestoreKey.SelectedIndex].Vk;
         uint pinVk    = SupportedKeys[_cmbPinKey.SelectedIndex].Vk;
+        uint unpinVk  = SupportedKeys[_cmbUnpinKey.SelectedIndex].Vk;
         uint autoPinVk = SupportedKeys[_cmbAutoPinKey.SelectedIndex].Vk;
 
-        if (hotkeyMod == pinMod && hotkeyVk == pinVk)
-            return "Maximize and Pin hotkeys cannot be the same combination.";
-        if (hotkeyMod == autoPinMod && hotkeyVk == autoPinVk)
-            return "Maximize and Auto-pin hotkeys cannot be the same combination.";
-        if (pinMod == autoPinMod && pinVk == autoPinVk)
-            return "Pin and Auto-pin hotkeys cannot be the same combination.";
+        // Collect hotkeys that are actually registered. Toggle pairs (maximize==restore,
+        // pin==unpin) register a single key, so the second one is skipped here.
+        var registered = new List<(uint Mod, uint Key, string Name)>
+        {
+            (hotkeyMod, hotkeyVk, "Maximize"),
+            (pinMod, pinVk, "Pin"),
+            (autoPinMod, autoPinVk, "Auto-pin"),
+        };
+        if (!(hotkeyMod == restoreMod && hotkeyVk == restoreVk))
+            registered.Add((restoreMod, restoreVk, "Restore"));
+        if (!(pinMod == unpinMod && pinVk == unpinVk))
+            registered.Add((unpinMod, unpinVk, "Unpin"));
+
+        for (int i = 0; i < registered.Count; i++)
+        {
+            for (int j = i + 1; j < registered.Count; j++)
+            {
+                if (registered[i].Mod == registered[j].Mod && registered[i].Key == registered[j].Key)
+                    return $"{registered[i].Name} and {registered[j].Name} hotkeys cannot be the same combination.";
+            }
+        }
 
         return null;
     }
@@ -284,8 +343,12 @@ internal sealed class SettingsDialog : Form
     {
         _settings.HotkeyModifiers    = BuildModifiers(_chkHotkeyCtrl, _chkHotkeyAlt, _chkHotkeyShift, _chkHotkeyWin);
         _settings.HotkeyKey          = _cmbHotkeyKey.SelectedIndex >= 0 ? SupportedKeys[_cmbHotkeyKey.SelectedIndex].Vk : NativeMethods.VK_X;
+        _settings.RestoreHotkeyModifiers = BuildModifiers(_chkRestoreCtrl, _chkRestoreAlt, _chkRestoreShift, _chkRestoreWin);
+        _settings.RestoreHotkeyKey   = _cmbRestoreKey.SelectedIndex >= 0 ? SupportedKeys[_cmbRestoreKey.SelectedIndex].Vk : NativeMethods.VK_X;
         _settings.PinHotkeyModifiers = BuildModifiers(_chkPinCtrl, _chkPinAlt, _chkPinShift, _chkPinWin);
         _settings.PinHotkeyKey       = _cmbPinKey.SelectedIndex >= 0 ? SupportedKeys[_cmbPinKey.SelectedIndex].Vk : NativeMethods.VK_P;
+        _settings.UnpinHotkeyModifiers = BuildModifiers(_chkUnpinCtrl, _chkUnpinAlt, _chkUnpinShift, _chkUnpinWin);
+        _settings.UnpinHotkeyKey     = _cmbUnpinKey.SelectedIndex >= 0 ? SupportedKeys[_cmbUnpinKey.SelectedIndex].Vk : NativeMethods.VK_P;
         _settings.AutoPinHotkeyModifiers = BuildModifiers(_chkAutoPinCtrl, _chkAutoPinAlt, _chkAutoPinShift, _chkAutoPinWin);
         _settings.AutoPinHotkeyKey   = _cmbAutoPinKey.SelectedIndex >= 0 ? SupportedKeys[_cmbAutoPinKey.SelectedIndex].Vk : NativeMethods.VK_A;
         _settings.ShowSwitchPopup    = _chkShowSwitchPopup.Checked;

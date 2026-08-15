@@ -14,6 +14,8 @@ internal sealed class TrayApplication : Form
     private const int HOTKEY_ID = 0x1;
     private const int HOTKEY_PIN_ID = 0x2;
     private const int HOTKEY_AUTOPIN_ID = 0x3;
+    private const int HOTKEY_RESTORE_ID = 0x4;
+    private const int HOTKEY_UNPIN_ID = 0x5;
     private uint _shellRestartMessage;
     private bool _comInitialized;
 
@@ -166,6 +168,22 @@ internal sealed class TrayApplication : Form
             Trace.WriteLine($"TrayApplication: Registered hotkey {FormatHotkey(_settings.HotkeyModifiers, _settings.HotkeyKey)}");
         }
 
+        // Restore hotkey — only register if different from maximize (otherwise maximize acts as toggle)
+        if (!HotkeysSame(_settings.HotkeyModifiers, _settings.HotkeyKey,
+                         _settings.RestoreHotkeyModifiers, _settings.RestoreHotkeyKey))
+        {
+            if (!NativeMethods.RegisterHotKey(Handle, HOTKEY_RESTORE_ID,
+                _settings.RestoreHotkeyModifiers | NativeMethods.MOD_NOREPEAT,
+                _settings.RestoreHotkeyKey))
+            {
+                Trace.WriteLine("TrayApplication: Failed to register restore hotkey.");
+            }
+            else
+            {
+                Trace.WriteLine($"TrayApplication: Registered restore hotkey {FormatHotkey(_settings.RestoreHotkeyModifiers, _settings.RestoreHotkeyKey)}");
+            }
+        }
+
         if (!NativeMethods.RegisterHotKey(Handle, HOTKEY_PIN_ID,
             _settings.PinHotkeyModifiers | NativeMethods.MOD_NOREPEAT,
             _settings.PinHotkeyKey))
@@ -175,6 +193,22 @@ internal sealed class TrayApplication : Form
         else
         {
             Trace.WriteLine($"TrayApplication: Registered pin hotkey {FormatHotkey(_settings.PinHotkeyModifiers, _settings.PinHotkeyKey)}");
+        }
+
+        // Unpin hotkey — only register if different from pin (otherwise pin acts as toggle)
+        if (!HotkeysSame(_settings.PinHotkeyModifiers, _settings.PinHotkeyKey,
+                         _settings.UnpinHotkeyModifiers, _settings.UnpinHotkeyKey))
+        {
+            if (!NativeMethods.RegisterHotKey(Handle, HOTKEY_UNPIN_ID,
+                _settings.UnpinHotkeyModifiers | NativeMethods.MOD_NOREPEAT,
+                _settings.UnpinHotkeyKey))
+            {
+                Trace.WriteLine("TrayApplication: Failed to register unpin hotkey.");
+            }
+            else
+            {
+                Trace.WriteLine($"TrayApplication: Registered unpin hotkey {FormatHotkey(_settings.UnpinHotkeyModifiers, _settings.UnpinHotkeyKey)}");
+            }
         }
 
         if (!NativeMethods.RegisterHotKey(Handle, HOTKEY_AUTOPIN_ID,
@@ -204,9 +238,21 @@ internal sealed class TrayApplication : Form
             return;
         }
 
+        if (m.Msg == (int)NativeMethods.WM_HOTKEY && m.WParam == (IntPtr)HOTKEY_RESTORE_ID)
+        {
+            OnRestoreHotkeyPressed();
+            return;
+        }
+
         if (m.Msg == (int)NativeMethods.WM_HOTKEY && m.WParam == (IntPtr)HOTKEY_PIN_ID)
         {
             OnPinHotkeyPressed();
+            return;
+        }
+
+        if (m.Msg == (int)NativeMethods.WM_HOTKEY && m.WParam == (IntPtr)HOTKEY_UNPIN_ID)
+        {
+            OnUnpinHotkeyPressed();
             return;
         }
 
@@ -244,41 +290,79 @@ internal sealed class TrayApplication : Form
 
     private void OnHotkeyPressed()
     {
-        if (!_comInitialized)
-        {
-            Trace.WriteLine("TrayApplication: Hotkey pressed but COM not initialized.");
-            return;
-        }
+        var hwnd = GetForegroundWindowForAction("Hotkey");
+        if (hwnd == IntPtr.Zero) return;
 
-        var hwnd = NativeMethods.GetForegroundWindow();
-        if (hwnd == IntPtr.Zero || hwnd == Handle)
+        // If maximize and restore share the same hotkey, behave as a toggle.
+        if (HotkeysSame(_settings.HotkeyModifiers, _settings.HotkeyKey,
+                        _settings.RestoreHotkeyModifiers, _settings.RestoreHotkeyKey))
         {
-            Trace.WriteLine("TrayApplication: Hotkey pressed but no valid foreground window.");
-            return;
+            Trace.WriteLine($"TrayApplication: Hotkey pressed, toggling window {hwnd}");
+            _manager.Toggle(hwnd);
         }
+        else
+        {
+            Trace.WriteLine($"TrayApplication: Hotkey pressed, maximizing window {hwnd}");
+            _manager.Maximize(hwnd);
+        }
+    }
 
-        Trace.WriteLine($"TrayApplication: Hotkey pressed, toggling window {hwnd}");
-        _manager.Toggle(hwnd);
+    private void OnRestoreHotkeyPressed()
+    {
+        var hwnd = GetForegroundWindowForAction("Restore hotkey");
+        if (hwnd == IntPtr.Zero) return;
+
+        Trace.WriteLine($"TrayApplication: Restore hotkey pressed, restoring window {hwnd}");
+        _manager.Restore(hwnd);
     }
 
     private void OnPinHotkeyPressed()
     {
+        var hwnd = GetForegroundWindowForAction("Pin hotkey");
+        if (hwnd == IntPtr.Zero) return;
+
+        // If pin and unpin share the same hotkey, behave as a toggle.
+        if (HotkeysSame(_settings.PinHotkeyModifiers, _settings.PinHotkeyKey,
+                        _settings.UnpinHotkeyModifiers, _settings.UnpinHotkeyKey))
+        {
+            Trace.WriteLine($"TrayApplication: Pin hotkey pressed, toggling pin for window {hwnd}");
+            _manager.PinToggle(hwnd);
+        }
+        else
+        {
+            Trace.WriteLine($"TrayApplication: Pin hotkey pressed, pinning window {hwnd}");
+            _manager.Pin(hwnd);
+        }
+    }
+
+    private void OnUnpinHotkeyPressed()
+    {
+        var hwnd = GetForegroundWindowForAction("Unpin hotkey");
+        if (hwnd == IntPtr.Zero) return;
+
+        Trace.WriteLine($"TrayApplication: Unpin hotkey pressed, unpinning window {hwnd}");
+        _manager.Unpin(hwnd);
+    }
+
+    private IntPtr GetForegroundWindowForAction(string action)
+    {
         if (!_comInitialized)
         {
-            Trace.WriteLine("TrayApplication: Pin hotkey pressed but COM not initialized.");
-            return;
+            Trace.WriteLine($"TrayApplication: {action} pressed but COM not initialized.");
+            return IntPtr.Zero;
         }
 
         var hwnd = NativeMethods.GetForegroundWindow();
         if (hwnd == IntPtr.Zero || hwnd == Handle)
         {
-            Trace.WriteLine("TrayApplication: Pin hotkey pressed but no valid foreground window.");
-            return;
+            Trace.WriteLine($"TrayApplication: {action} pressed but no valid foreground window.");
+            return IntPtr.Zero;
         }
-
-        Trace.WriteLine($"TrayApplication: Pin hotkey pressed, toggling pin for window {hwnd}");
-        _manager.PinToggle(hwnd);
+        return hwnd;
     }
+
+    private static bool HotkeysSame(uint mod1, uint key1, uint mod2, uint key2)
+        => mod1 == mod2 && key1 == key2;
 
     private void ToggleAutoPin()
     {
@@ -387,7 +471,9 @@ internal sealed class TrayApplication : Form
 
         // Re-register hotkeys with the new configuration
         NativeMethods.UnregisterHotKey(Handle, HOTKEY_ID);
+        NativeMethods.UnregisterHotKey(Handle, HOTKEY_RESTORE_ID);
         NativeMethods.UnregisterHotKey(Handle, HOTKEY_PIN_ID);
+        NativeMethods.UnregisterHotKey(Handle, HOTKEY_UNPIN_ID);
         NativeMethods.UnregisterHotKey(Handle, HOTKEY_AUTOPIN_ID);
 
         if (_comInitialized)
@@ -400,12 +486,30 @@ internal sealed class TrayApplication : Form
                 Trace.WriteLine("TrayApplication: Failed to register hotkey after settings change.");
                 failures.Add("Maximize hotkey");
             }
+            if (!HotkeysSame(_settings.HotkeyModifiers, _settings.HotkeyKey,
+                             _settings.RestoreHotkeyModifiers, _settings.RestoreHotkeyKey)
+                && !NativeMethods.RegisterHotKey(Handle, HOTKEY_RESTORE_ID,
+                    _settings.RestoreHotkeyModifiers | NativeMethods.MOD_NOREPEAT,
+                    _settings.RestoreHotkeyKey))
+            {
+                Trace.WriteLine("TrayApplication: Failed to register restore hotkey after settings change.");
+                failures.Add("Restore hotkey");
+            }
             if (!NativeMethods.RegisterHotKey(Handle, HOTKEY_PIN_ID,
                 _settings.PinHotkeyModifiers | NativeMethods.MOD_NOREPEAT,
                 _settings.PinHotkeyKey))
             {
                 Trace.WriteLine("TrayApplication: Failed to register pin hotkey after settings change.");
                 failures.Add("Pin hotkey");
+            }
+            if (!HotkeysSame(_settings.PinHotkeyModifiers, _settings.PinHotkeyKey,
+                             _settings.UnpinHotkeyModifiers, _settings.UnpinHotkeyKey)
+                && !NativeMethods.RegisterHotKey(Handle, HOTKEY_UNPIN_ID,
+                    _settings.UnpinHotkeyModifiers | NativeMethods.MOD_NOREPEAT,
+                    _settings.UnpinHotkeyKey))
+            {
+                Trace.WriteLine("TrayApplication: Failed to register unpin hotkey after settings change.");
+                failures.Add("Unpin hotkey");
             }
             if (!NativeMethods.RegisterHotKey(Handle, HOTKEY_AUTOPIN_ID,
                 _settings.AutoPinHotkeyModifiers | NativeMethods.MOD_NOREPEAT,
@@ -678,7 +782,9 @@ internal sealed class TrayApplication : Form
 
         // Clean up native resources
         NativeMethods.UnregisterHotKey(Handle, HOTKEY_ID);
+        NativeMethods.UnregisterHotKey(Handle, HOTKEY_RESTORE_ID);
         NativeMethods.UnregisterHotKey(Handle, HOTKEY_PIN_ID);
+        NativeMethods.UnregisterHotKey(Handle, HOTKEY_UNPIN_ID);
         NativeMethods.UnregisterHotKey(Handle, HOTKEY_AUTOPIN_ID);
         _mouseHook.Dispose();
         _monitor.Dispose();

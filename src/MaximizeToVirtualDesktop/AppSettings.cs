@@ -21,12 +21,26 @@ internal sealed class AppSettings
     /// <summary>Virtual key code for the maximize hotkey.</summary>
     public uint HotkeyKey { get; set; } = NativeMethods.VK_X;
 
+    /// <summary>Modifier flags for the restore hotkey. Defaults to match the maximize hotkey (toggle behavior).</summary>
+    public uint RestoreHotkeyModifiers { get; set; } =
+        NativeMethods.MOD_CONTROL | NativeMethods.MOD_ALT | NativeMethods.MOD_SHIFT;
+
+    /// <summary>Virtual key code for the restore hotkey.</summary>
+    public uint RestoreHotkeyKey { get; set; } = NativeMethods.VK_X;
+
     /// <summary>Modifier flags for the pin hotkey.</summary>
     public uint PinHotkeyModifiers { get; set; } =
         NativeMethods.MOD_CONTROL | NativeMethods.MOD_ALT | NativeMethods.MOD_SHIFT;
 
     /// <summary>Virtual key code for the pin hotkey.</summary>
     public uint PinHotkeyKey { get; set; } = NativeMethods.VK_P;
+
+    /// <summary>Modifier flags for the unpin hotkey. Defaults to match the pin hotkey (toggle behavior).</summary>
+    public uint UnpinHotkeyModifiers { get; set; } =
+        NativeMethods.MOD_CONTROL | NativeMethods.MOD_ALT | NativeMethods.MOD_SHIFT;
+
+    /// <summary>Virtual key code for the unpin hotkey.</summary>
+    public uint UnpinHotkeyKey { get; set; } = NativeMethods.VK_P;
 
     /// <summary>Modifier flags for the auto-pin hotkey.</summary>
     public uint AutoPinHotkeyModifiers { get; set; } =
