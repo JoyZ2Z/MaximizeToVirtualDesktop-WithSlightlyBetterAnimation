@@ -66,6 +66,9 @@ internal static partial class NativeMethods
     [DllImport("user32.dll")]
     internal static extern int GetWindowTextLength(IntPtr hWnd);
 
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    internal static extern int GetClassName(IntPtr hWnd, System.Text.StringBuilder lpClassName, int nMaxCount);
+
     [DllImport("user32.dll")]
     internal static extern short GetAsyncKeyState(int vKey);
 
@@ -227,6 +230,7 @@ internal static partial class NativeMethods
 
     internal const uint VK_X = 0x58;
     internal const uint VK_P = 0x50;
+    internal const uint VK_A = 0x41;
 
     internal const uint WINEVENT_OUTOFCONTEXT = 0x0000;
     internal const uint EVENT_OBJECT_DESTROY = 0x8001;

@@ -28,6 +28,16 @@ internal sealed class AppSettings
     /// <summary>Virtual key code for the pin hotkey.</summary>
     public uint PinHotkeyKey { get; set; } = NativeMethods.VK_P;
 
+    /// <summary>Modifier flags for the auto-pin hotkey.</summary>
+    public uint AutoPinHotkeyModifiers { get; set; } =
+        NativeMethods.MOD_CONTROL | NativeMethods.MOD_ALT | NativeMethods.MOD_SHIFT;
+
+    /// <summary>Virtual key code for the auto-pin hotkey.</summary>
+    public uint AutoPinHotkeyKey { get; set; } = NativeMethods.VK_A;
+
+    /// <summary>When true, continuously pin non-fullscreen windows to all desktops.</summary>
+    public bool AutoPinEnabled { get; set; } = false;
+
     /// <summary>
     /// When true, any click on the maximize button sends the window to a virtual desktop.
     /// Shift+Click performs a normal maximize instead.

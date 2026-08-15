@@ -13,6 +13,7 @@ internal sealed class TrayApplication : Form
 {
     private const int HOTKEY_ID = 0x1;
     private const int HOTKEY_PIN_ID = 0x2;
+    private const int HOTKEY_AUTOPIN_ID = 0x3;
     private uint _shellRestartMessage;
     private bool _comInitialized;
 
@@ -23,8 +24,10 @@ internal sealed class TrayApplication : Form
     private readonly FullScreenManager _manager;
     private readonly WindowMonitor _monitor;
     private readonly MaximizeButtonHook _mouseHook;
+    private readonly AutoPinService _autoPin;
     private readonly System.Windows.Forms.Timer _cleanupTimer;
     private System.Windows.Forms.Timer? _retryTimer;
+    private ToolStripMenuItem _autoPinItem = null!;
 
     internal static readonly UpdatumManager Updater = new("shanselman", "MaximizeToVirtualDesktop")
     {
@@ -50,6 +53,7 @@ internal sealed class TrayApplication : Form
         _manager = new FullScreenManager(_vds, _tracker, _settings, this);
         _monitor = new WindowMonitor(_manager, _tracker, this, _settings);
         _mouseHook = new MaximizeButtonHook(_manager, this, _settings);
+        _autoPin = new AutoPinService(_vds, this);
 
         // System tray icon
         _trayIcon = new NotifyIcon
@@ -172,6 +176,24 @@ internal sealed class TrayApplication : Form
         {
             Trace.WriteLine($"TrayApplication: Registered pin hotkey {FormatHotkey(_settings.PinHotkeyModifiers, _settings.PinHotkeyKey)}");
         }
+
+        if (!NativeMethods.RegisterHotKey(Handle, HOTKEY_AUTOPIN_ID,
+            _settings.AutoPinHotkeyModifiers | NativeMethods.MOD_NOREPEAT,
+            _settings.AutoPinHotkeyKey))
+        {
+            Trace.WriteLine("TrayApplication: Failed to register auto-pin hotkey.");
+        }
+        else
+        {
+            Trace.WriteLine($"TrayApplication: Registered auto-pin hotkey {FormatHotkey(_settings.AutoPinHotkeyModifiers, _settings.AutoPinHotkeyKey)}");
+        }
+
+        // Restore persisted auto-pin state
+        if (_settings.AutoPinEnabled)
+        {
+            _autoPin.SetEnabled(true);
+            _autoPinItem.Checked = true;
+        }
     }
 
     protected override void WndProc(ref Message m)
@@ -185,6 +207,12 @@ internal sealed class TrayApplication : Form
         if (m.Msg == (int)NativeMethods.WM_HOTKEY && m.WParam == (IntPtr)HOTKEY_PIN_ID)
         {
             OnPinHotkeyPressed();
+            return;
+        }
+
+        if (m.Msg == (int)NativeMethods.WM_HOTKEY && m.WParam == (IntPtr)HOTKEY_AUTOPIN_ID)
+        {
+            ToggleAutoPin();
             return;
         }
 
@@ -252,6 +280,23 @@ internal sealed class TrayApplication : Form
         _manager.PinToggle(hwnd);
     }
 
+    private void ToggleAutoPin()
+    {
+        if (!_comInitialized)
+        {
+            Trace.WriteLine("TrayApplication: Auto-pin hotkey pressed but COM not initialized.");
+            return;
+        }
+
+        var enabled = !_autoPin.Enabled;
+        _autoPin.SetEnabled(enabled);
+        _autoPinItem.Checked = enabled;
+        _settings.AutoPinEnabled = enabled;
+        _settings.Save();
+        _trayIcon.Text = BuildTooltipText();
+        Trace.WriteLine($"TrayApplication: Auto-pin {(enabled ? "enabled" : "disabled")}.");
+    }
+
     private ContextMenuStrip BuildContextMenu()
     {
         var menu = new ContextMenuStrip();
@@ -272,6 +317,13 @@ internal sealed class TrayApplication : Form
             _manager.RestoreAll();
         });
         menu.Items.Add(restoreAllItem);
+
+        _autoPinItem = new ToolStripMenuItem("Auto-pin Non-fullscreen Windows")
+        {
+            Checked = _settings.AutoPinEnabled,
+        };
+        _autoPinItem.Click += (_, _) => ToggleAutoPin();
+        menu.Items.Add(_autoPinItem);
 
         menu.Items.Add(new ToolStripSeparator());
 
@@ -322,6 +374,7 @@ internal sealed class TrayApplication : Form
         // Re-register hotkeys with the new configuration
         NativeMethods.UnregisterHotKey(Handle, HOTKEY_ID);
         NativeMethods.UnregisterHotKey(Handle, HOTKEY_PIN_ID);
+        NativeMethods.UnregisterHotKey(Handle, HOTKEY_AUTOPIN_ID);
 
         if (_comInitialized)
         {
@@ -339,6 +392,13 @@ internal sealed class TrayApplication : Form
             {
                 Trace.WriteLine("TrayApplication: Failed to register pin hotkey after settings change.");
                 failures.Add("Pin hotkey");
+            }
+            if (!NativeMethods.RegisterHotKey(Handle, HOTKEY_AUTOPIN_ID,
+                _settings.AutoPinHotkeyModifiers | NativeMethods.MOD_NOREPEAT,
+                _settings.AutoPinHotkeyKey))
+            {
+                Trace.WriteLine("TrayApplication: Failed to register auto-pin hotkey after settings change.");
+                failures.Add("Auto-pin hotkey");
             }
             if (failures.Count > 0)
             {
@@ -605,8 +665,10 @@ internal sealed class TrayApplication : Form
         // Clean up native resources
         NativeMethods.UnregisterHotKey(Handle, HOTKEY_ID);
         NativeMethods.UnregisterHotKey(Handle, HOTKEY_PIN_ID);
+        NativeMethods.UnregisterHotKey(Handle, HOTKEY_AUTOPIN_ID);
         _mouseHook.Dispose();
         _monitor.Dispose();
+        _autoPin.Dispose();
         _vds.Dispose();
 
         _trayIcon.Visible = false;
