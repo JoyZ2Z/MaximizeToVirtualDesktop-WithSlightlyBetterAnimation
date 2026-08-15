@@ -192,7 +192,7 @@ internal sealed class TrayApplication : Form
         if (_settings.AutoPinEnabled)
         {
             _autoPin.SetEnabled(true);
-            _autoPinItem.Checked = true;
+            UpdateAutoPinMenuItem();
         }
     }
 
@@ -290,11 +290,23 @@ internal sealed class TrayApplication : Form
 
         var enabled = !_autoPin.Enabled;
         _autoPin.SetEnabled(enabled);
-        _autoPinItem.Checked = enabled;
+        UpdateAutoPinMenuItem();
         _settings.AutoPinEnabled = enabled;
         _settings.Save();
         _trayIcon.Text = BuildTooltipText();
+        NotificationOverlay.ShowNotification(
+            enabled ? "📌 Auto-pin Enabled" : "📌 Auto-pin Disabled",
+            enabled ? "Non-fullscreen windows pinned to all desktops" : "Previously pinned windows restored",
+            IntPtr.Zero);
         Trace.WriteLine($"TrayApplication: Auto-pin {(enabled ? "enabled" : "disabled")}.");
+    }
+
+    private void UpdateAutoPinMenuItem()
+    {
+        _autoPinItem.Checked = _autoPin.Enabled;
+        _autoPinItem.Text = _autoPin.Enabled
+            ? "Auto-pin Non-fullscreen Windows: ON"
+            : "Auto-pin Non-fullscreen Windows: OFF";
     }
 
     private ContextMenuStrip BuildContextMenu()
@@ -324,6 +336,8 @@ internal sealed class TrayApplication : Form
         };
         _autoPinItem.Click += (_, _) => ToggleAutoPin();
         menu.Items.Add(_autoPinItem);
+
+        menu.Opening += (_, _) => UpdateAutoPinMenuItem();
 
         menu.Items.Add(new ToolStripSeparator());
 

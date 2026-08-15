@@ -16,6 +16,9 @@ internal sealed class SettingsDialog : Form
     private readonly CheckBox _chkPinCtrl, _chkPinAlt, _chkPinShift, _chkPinWin;
     private readonly ComboBox _cmbPinKey;
 
+    private readonly CheckBox _chkAutoPinCtrl, _chkAutoPinAlt, _chkAutoPinShift, _chkAutoPinWin;
+    private readonly ComboBox _cmbAutoPinKey;
+
     private readonly CheckBox _chkInvertShiftClick;
     private readonly CheckBox _chkShowSwitchPopup;
     private Button _btnStartup = null!;
@@ -62,6 +65,13 @@ internal sealed class SettingsDialog : Form
         (_chkPinCtrl, _chkPinAlt, _chkPinShift, _chkPinWin, _cmbPinKey) =
             AddHotkeyRow(grpPin, settings.PinHotkeyModifiers, settings.PinHotkeyKey);
         y += grpPin.Height + 12;
+
+        // Auto-pin hotkey group
+        var grpAutoPin = new GroupBox { Text = "Auto-pin Hotkey", Location = new Point(margin, y), Size = new Size(grpW, 72) };
+        Controls.Add(grpAutoPin);
+        (_chkAutoPinCtrl, _chkAutoPinAlt, _chkAutoPinShift, _chkAutoPinWin, _cmbAutoPinKey) =
+            AddHotkeyRow(grpAutoPin, settings.AutoPinHotkeyModifiers, settings.AutoPinHotkeyKey);
+        y += grpAutoPin.Height + 12;
 
         // Behavior group
         var grpBehavior = new GroupBox { Text = "Behavior", Location = new Point(margin, y), Size = new Size(grpW, 124) };
@@ -197,6 +207,12 @@ internal sealed class SettingsDialog : Form
         _chkPinWin.Checked   = false;
         _cmbPinKey.SelectedIndex = Array.FindIndex(SupportedKeys, k => k.Vk == NativeMethods.VK_P);
 
+        _chkAutoPinCtrl.Checked  = true;
+        _chkAutoPinAlt.Checked   = true;
+        _chkAutoPinShift.Checked = true;
+        _chkAutoPinWin.Checked   = false;
+        _cmbAutoPinKey.SelectedIndex = Array.FindIndex(SupportedKeys, k => k.Vk == NativeMethods.VK_A);
+
         _chkShowSwitchPopup.Checked = true;
         _chkInvertShiftClick.Checked = false;
     }
@@ -234,21 +250,31 @@ internal sealed class SettingsDialog : Form
     {
         uint hotkeyMod = BuildModifiers(_chkHotkeyCtrl, _chkHotkeyAlt, _chkHotkeyShift, _chkHotkeyWin);
         uint pinMod    = BuildModifiers(_chkPinCtrl, _chkPinAlt, _chkPinShift, _chkPinWin);
+        uint autoPinMod = BuildModifiers(_chkAutoPinCtrl, _chkAutoPinAlt, _chkAutoPinShift, _chkAutoPinWin);
 
         if (hotkeyMod == 0)
             return "Maximize hotkey needs at least one modifier (Ctrl, Alt, Shift, or Win).";
         if (pinMod == 0)
             return "Pin hotkey needs at least one modifier (Ctrl, Alt, Shift, or Win).";
+        if (autoPinMod == 0)
+            return "Auto-pin hotkey needs at least one modifier (Ctrl, Alt, Shift, or Win).";
         if (_cmbHotkeyKey.SelectedIndex < 0)
             return "Please select a key for the maximize hotkey.";
         if (_cmbPinKey.SelectedIndex < 0)
             return "Please select a key for the pin hotkey.";
+        if (_cmbAutoPinKey.SelectedIndex < 0)
+            return "Please select a key for the auto-pin hotkey.";
 
         uint hotkeyVk = SupportedKeys[_cmbHotkeyKey.SelectedIndex].Vk;
         uint pinVk    = SupportedKeys[_cmbPinKey.SelectedIndex].Vk;
+        uint autoPinVk = SupportedKeys[_cmbAutoPinKey.SelectedIndex].Vk;
 
         if (hotkeyMod == pinMod && hotkeyVk == pinVk)
             return "Maximize and Pin hotkeys cannot be the same combination.";
+        if (hotkeyMod == autoPinMod && hotkeyVk == autoPinVk)
+            return "Maximize and Auto-pin hotkeys cannot be the same combination.";
+        if (pinMod == autoPinMod && pinVk == autoPinVk)
+            return "Pin and Auto-pin hotkeys cannot be the same combination.";
 
         return null;
     }
@@ -260,6 +286,8 @@ internal sealed class SettingsDialog : Form
         _settings.HotkeyKey          = _cmbHotkeyKey.SelectedIndex >= 0 ? SupportedKeys[_cmbHotkeyKey.SelectedIndex].Vk : NativeMethods.VK_X;
         _settings.PinHotkeyModifiers = BuildModifiers(_chkPinCtrl, _chkPinAlt, _chkPinShift, _chkPinWin);
         _settings.PinHotkeyKey       = _cmbPinKey.SelectedIndex >= 0 ? SupportedKeys[_cmbPinKey.SelectedIndex].Vk : NativeMethods.VK_P;
+        _settings.AutoPinHotkeyModifiers = BuildModifiers(_chkAutoPinCtrl, _chkAutoPinAlt, _chkAutoPinShift, _chkAutoPinWin);
+        _settings.AutoPinHotkeyKey   = _cmbAutoPinKey.SelectedIndex >= 0 ? SupportedKeys[_cmbAutoPinKey.SelectedIndex].Vk : NativeMethods.VK_A;
         _settings.ShowSwitchPopup    = _chkShowSwitchPopup.Checked;
         _settings.InvertShiftClick   = _chkInvertShiftClick.Checked;
     }
