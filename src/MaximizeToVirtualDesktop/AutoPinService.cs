@@ -6,31 +6,28 @@ namespace MaximizeToVirtualDesktop;
 
 /// <summary>
 /// Continuously pins non-fullscreen windows to all virtual desktops while enabled.
-/// Windows are unpinned only while the current desktop is a fullscreen desktop
-/// (a MaximizeToVirtualDesktop temp desktop with a fullscreen app), so the fullscreen
-/// app isn't covered by pinned windows. In every other case all qualifying windows
-/// stay pinned to all desktops.
+/// The foreground window is temporarily unpinned so it stays on the current desktop;
+/// when it loses focus (or is left behind by a desktop switch) it is re-pinned.
 /// </summary>
 internal sealed class AutoPinService : IDisposable
 {
     private readonly VirtualDesktopService _vds;
-    private readonly FullScreenTracker _tracker;
     private readonly Control _syncControl;
     private readonly System.Windows.Forms.Timer _scanTimer;
-    private readonly System.Windows.Forms.Timer _desktopTimer;
+    private readonly System.Windows.Forms.Timer _foregroundTimer;
     private readonly HashSet<IntPtr> _autoPinned = new();
-    private Guid? _lastDesktopId;
+    private readonly HashSet<IntPtr> _temporarilyUnpinned = new();
+    private IntPtr _lastForeground;
     private bool _enabled;
 
-    public AutoPinService(VirtualDesktopService vds, FullScreenTracker tracker, Control syncControl)
+    public AutoPinService(VirtualDesktopService vds, Control syncControl)
     {
         _vds = vds;
-        _tracker = tracker;
         _syncControl = syncControl;
         _scanTimer = new System.Windows.Forms.Timer { Interval = 1500 };
         _scanTimer.Tick += (_, _) => Scan();
-        _desktopTimer = new System.Windows.Forms.Timer { Interval = 200 };
-        _desktopTimer.Tick += (_, _) => DetectDesktopChange();
+        _foregroundTimer = new System.Windows.Forms.Timer { Interval = 200 };
+        _foregroundTimer.Tick += (_, _) => DetectForegroundChange();
     }
 
     public bool Enabled => _enabled;
@@ -42,53 +39,96 @@ internal sealed class AutoPinService : IDisposable
 
         if (enabled)
         {
-            _lastDesktopId = _vds.GetCurrentDesktopId();
             Scan();
             _scanTimer.Start();
-            _desktopTimer.Start();
+            _foregroundTimer.Start();
+            _lastForeground = NativeMethods.GetForegroundWindow();
+            UnpinForeground(_lastForeground);
             Trace.WriteLine("AutoPinService: Enabled.");
         }
         else
         {
             _scanTimer.Stop();
-            _desktopTimer.Stop();
+            _foregroundTimer.Stop();
             UnpinAll();
+            _temporarilyUnpinned.Clear();
             Trace.WriteLine("AutoPinService: Disabled.");
         }
     }
 
-    private void DetectDesktopChange()
+    /// <summary>
+    /// Temporarily unpin all auto-pinned windows. Called before MaximizeToVirtualDesktop
+    /// switches to a new desktop, so the foreground app isn't dragged along.
+    /// </summary>
+    public void SuspendAll()
     {
-        var currentId = _vds.GetCurrentDesktopId();
-        if (currentId == null || currentId == _lastDesktopId) return;
-        _lastDesktopId = currentId;
-
-        if (IsFullScreenDesktop(currentId.Value))
+        foreach (var hwnd in _autoPinned.ToList())
         {
-            // On a fullscreen desktop, unpin everything so the fullscreen app is alone.
-            UnpinAll();
-        }
-        else
-        {
-            // On a normal desktop, pin all qualifying windows.
-            Scan();
+            if (NativeMethods.IsWindow(hwnd) && _vds.UnpinWindow(hwnd))
+            {
+                _autoPinned.Remove(hwnd);
+                _temporarilyUnpinned.Add(hwnd);
+            }
         }
     }
 
-    private bool IsFullScreenDesktop(Guid desktopId)
+    /// <summary>
+    /// Re-pin windows that were temporarily unpinned by <see cref="SuspendAll"/> or by
+    /// the foreground-unpin logic, skipping the current foreground window.
+    /// </summary>
+    public void ResumeAll()
     {
-        foreach (var entry in _tracker.GetAll())
+        var fg = NativeMethods.GetForegroundWindow();
+        foreach (var hwnd in _temporarilyUnpinned.ToList())
         {
-            if (entry.TempDesktopId == desktopId) return true;
+            if (hwnd == fg) continue; // keep the foreground window unpinned
+            _temporarilyUnpinned.Remove(hwnd);
+            if (NativeMethods.IsWindow(hwnd) && ShouldPin(hwnd) && !_vds.IsWindowPinned(hwnd))
+            {
+                if (_vds.PinWindow(hwnd)) _autoPinned.Add(hwnd);
+            }
         }
-        return false;
+    }
+
+    private void DetectForegroundChange()
+    {
+        var fg = NativeMethods.GetForegroundWindow();
+        if (fg == _lastForeground) return;
+        var prev = _lastForeground;
+        _lastForeground = fg;
+
+        // Re-pin the previous foreground window (now in the background).
+        if (prev != IntPtr.Zero && _temporarilyUnpinned.Remove(prev))
+        {
+            if (NativeMethods.IsWindow(prev) && ShouldPin(prev) && !_vds.IsWindowPinned(prev))
+            {
+                if (_vds.PinWindow(prev))
+                {
+                    _autoPinned.Add(prev);
+                    Trace.WriteLine($"AutoPinService: Re-pinned window {prev}.");
+                }
+            }
+        }
+
+        // Unpin the new foreground window.
+        UnpinForeground(fg);
+    }
+
+    private void UnpinForeground(IntPtr fg)
+    {
+        if (fg == IntPtr.Zero || fg == _syncControl.Handle) return;
+        if (!_autoPinned.Contains(fg)) return;
+
+        if (_vds.UnpinWindow(fg))
+        {
+            _autoPinned.Remove(fg);
+            _temporarilyUnpinned.Add(fg);
+            Trace.WriteLine($"AutoPinService: Temporarily unpinned foreground window {fg}.");
+        }
     }
 
     private void Scan()
     {
-        var currentId = _vds.GetCurrentDesktopId();
-        bool isFullScreen = currentId != null && IsFullScreenDesktop(currentId.Value);
-
         var currentWindows = new HashSet<IntPtr>();
 
         NativeMethods.EnumWindows((hwnd, _) =>
@@ -96,8 +136,8 @@ internal sealed class AutoPinService : IDisposable
             if (ShouldPin(hwnd))
             {
                 currentWindows.Add(hwnd);
-                if (!isFullScreen
-                    && !_autoPinned.Contains(hwnd)
+                if (!_autoPinned.Contains(hwnd)
+                    && !_temporarilyUnpinned.Contains(hwnd)
                     && !_vds.IsWindowPinned(hwnd))
                 {
                     if (_vds.PinWindow(hwnd))
@@ -109,10 +149,10 @@ internal sealed class AutoPinService : IDisposable
             return true;
         }, IntPtr.Zero);
 
-        // On a fullscreen desktop, unpin everything. Otherwise unpin windows that
-        // no longer qualify (became maximized, minimized, hidden, or closed).
+        // Unpin windows we previously pinned but that no longer qualify
+        // (became maximized, minimized, hidden, or closed).
         var toUnpin = _autoPinned
-            .Where(h => isFullScreen || !currentWindows.Contains(h) || !NativeMethods.IsWindow(h))
+            .Where(h => !currentWindows.Contains(h) || !NativeMethods.IsWindow(h))
             .ToList();
 
         foreach (var hwnd in toUnpin)
@@ -169,8 +209,9 @@ internal sealed class AutoPinService : IDisposable
     {
         _scanTimer.Stop();
         _scanTimer.Dispose();
-        _desktopTimer.Stop();
-        _desktopTimer.Dispose();
+        _foregroundTimer.Stop();
+        _foregroundTimer.Dispose();
         UnpinAll();
+        _temporarilyUnpinned.Clear();
     }
 }

@@ -20,6 +20,9 @@ internal sealed class FullScreenManager
     // Multiple tracked windows may share the same TempDesktop COM pointer.
     private readonly HashSet<Guid> _releasedDesktops = new();
 
+    /// <summary>Optional reference to the auto-pin service, used to suspend/resume pinning around desktop switches.</summary>
+    public AutoPinService? AutoPin { get; set; }
+
     public FullScreenManager(VirtualDesktopService vds, FullScreenTracker tracker, AppSettings settings, Control syncControl)
     {
         _vds = vds;
@@ -146,11 +149,16 @@ internal sealed class FullScreenManager
             }
         }
 
+        // Temporarily unpin all auto-pinned windows so the foreground app isn't
+        // dragged onto the new desktop when we switch.
+        AutoPin?.SuspendAll();
+
         _vds.PinWindow(hwnd);
 
         if (!_vds.SwitchToDesktop(tempDesktop))
         {
             _vds.UnpinWindow(hwnd);
+            AutoPin?.ResumeAll();
             RollbackSwitch(tempDesktop, originalDesktopId.Value, hwnd, originalPlacement, elevated);
             return;
         }
@@ -158,11 +166,14 @@ internal sealed class FullScreenManager
         if (!_vds.MoveWindowToDesktop(hwnd, tempDesktop))
         {
             _vds.UnpinWindow(hwnd);
+            AutoPin?.ResumeAll();
             RollbackSwitch(tempDesktop, originalDesktopId.Value, hwnd, originalPlacement, elevated);
             return;
         }
 
         _vds.UnpinWindow(hwnd);
+
+        AutoPin?.ResumeAll();
 
         ScheduleFocusRetry(hwnd, 4);
 
