@@ -11,7 +11,6 @@ internal abstract class DesktopManagerAdapter : IDisposable
 {
     public abstract int GetCount();
     public abstract IVirtualDesktop GetCurrentDesktop();
-    public abstract void GetDesktops(out IObjectArray desktops);
     public abstract IVirtualDesktop CreateDesktop();
     public abstract void MoveViewToDesktop(IApplicationView view, IVirtualDesktop desktop);
     public abstract int GetAdjacentDesktop(IVirtualDesktop from, int direction, out IVirtualDesktop desktop);
@@ -105,7 +104,6 @@ internal abstract class DesktopManagerAdapter : IDisposable
 
         public override int GetCount() => _com!.GetCount();
         public override IVirtualDesktop GetCurrentDesktop() => _com!.GetCurrentDesktop();
-        public override void GetDesktops(out IObjectArray desktops) => _com!.GetDesktops(out desktops);
         public override IVirtualDesktop CreateDesktop() => _com!.CreateDesktop();
         public override void MoveViewToDesktop(IApplicationView view, IVirtualDesktop desktop)
             => _com!.MoveViewToDesktop(view, desktop);
@@ -135,7 +133,6 @@ internal abstract class DesktopManagerAdapter : IDisposable
 
         public override int GetCount() => _com!.GetCount();
         public override IVirtualDesktop GetCurrentDesktop() => _com!.GetCurrentDesktop();
-        public override void GetDesktops(out IObjectArray desktops) => _com!.GetDesktops(out desktops);
         public override IVirtualDesktop CreateDesktop() => _com!.CreateDesktop();
         public override void MoveViewToDesktop(IApplicationView view, IVirtualDesktop desktop)
             => _com!.MoveViewToDesktop(view, desktop);

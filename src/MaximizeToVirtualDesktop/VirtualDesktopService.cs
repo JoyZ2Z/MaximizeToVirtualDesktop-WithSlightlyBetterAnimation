@@ -110,35 +110,6 @@ internal sealed class VirtualDesktopService : IDisposable
     }
 
     /// <summary>
-    /// Returns the ID of the main desktop (the first/leftmost desktop).
-    /// </summary>
-    public Guid? GetMainDesktopId()
-    {
-        IObjectArray? desktops = null;
-        object? obj = null;
-        try
-        {
-            _managerInternal!.GetDesktops(out desktops);
-            desktops.GetCount(out int count);
-            if (count == 0) return null;
-
-            var iid = typeof(IVirtualDesktop).GUID;
-            desktops.GetAt(0, ref iid, out obj);
-            return ((IVirtualDesktop)obj).GetId();
-        }
-        catch (Exception ex)
-        {
-            Trace.WriteLine($"VirtualDesktopService: GetMainDesktopId failed: {ex.Message}");
-            return null;
-        }
-        finally
-        {
-            if (obj != null) Marshal.ReleaseComObject(obj);
-            if (desktops != null) Marshal.ReleaseComObject(desktops);
-        }
-    }
-
-    /// <summary>
     /// Creates a new virtual desktop. Returns its ID, or null on failure.
     /// </summary>
     public (IVirtualDesktop? desktop, Guid? id) CreateDesktop()
