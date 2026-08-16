@@ -22,6 +22,7 @@ internal sealed class AutoPinService : IDisposable
     private readonly HashSet<IntPtr> _autoPinned = new();
     private readonly HashSet<IntPtr> _temporarilyUnpinned = new();
     private IntPtr _lastForeground;
+    private Guid? _mainDesktopId;
     private bool _enabled;
 
     public AutoPinService(VirtualDesktopService vds, Control syncControl)
@@ -43,6 +44,7 @@ internal sealed class AutoPinService : IDisposable
 
         if (enabled)
         {
+            _mainDesktopId = _vds.GetMainDesktopId();
             Scan();
             _scanTimer.Start();
             _foregroundTimer.Start();
@@ -104,6 +106,9 @@ internal sealed class AutoPinService : IDisposable
     {
         if (fg == IntPtr.Zero || fg == _syncControl.Handle) return;
         if (!_autoPinned.Contains(fg)) return;
+
+        // Windows on the main desktop stay pinned to all desktops — don't unpin them.
+        if (_mainDesktopId != null && _vds.GetDesktopIdForWindow(fg) == _mainDesktopId) return;
 
         if (_vds.UnpinWindow(fg))
         {
