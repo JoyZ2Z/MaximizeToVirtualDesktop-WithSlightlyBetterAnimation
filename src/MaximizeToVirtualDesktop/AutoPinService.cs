@@ -97,9 +97,12 @@ internal sealed class AutoPinService : IDisposable
         var prev = _lastForeground;
         _lastForeground = fg;
 
-        // Re-pin the previous foreground window (now in the background).
-        if (prev != IntPtr.Zero && _temporarilyUnpinned.Remove(prev))
+        // Re-pin the previous foreground window only on a same-desktop focus change.
+        // A desktop switch must NOT re-pin it, otherwise the pin/unpin churn breaks the
+        // window's z-order and it disappears when switching back.
+        if (prev != IntPtr.Zero && _temporarilyUnpinned.Contains(prev) && SameDesktop(prev, fg))
         {
+            _temporarilyUnpinned.Remove(prev);
             if (NativeMethods.IsWindow(prev) && ShouldPin(prev) && !_vds.IsWindowPinned(prev))
             {
                 if (_vds.PinWindow(prev))
@@ -112,6 +115,19 @@ internal sealed class AutoPinService : IDisposable
 
         // Unpin the new foreground window.
         UnpinForeground(fg);
+    }
+
+    /// <summary>
+    /// True if both windows belong to the same virtual desktop. A desktop switch
+    /// changes the foreground window to one on a different desktop, which should not
+    /// be treated as a focus loss (re-pinning would break the window's z-order).
+    /// </summary>
+    private bool SameDesktop(IntPtr a, IntPtr b)
+    {
+        if (a == IntPtr.Zero || b == IntPtr.Zero) return false;
+        var da = _vds.GetDesktopIdForWindow(a);
+        var db = _vds.GetDesktopIdForWindow(b);
+        return da != null && db != null && da.Value == db.Value;
     }
 
     private void UnpinForeground(IntPtr fg)
