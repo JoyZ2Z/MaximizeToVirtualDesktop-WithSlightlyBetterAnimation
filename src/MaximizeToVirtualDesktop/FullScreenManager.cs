@@ -372,6 +372,32 @@ internal sealed class FullScreenManager
     }
 
     /// <summary>
+    /// Remove temp desktops that no longer contain a fullscreen window — for example,
+    /// when the tracked window was moved off its temp desktop without going through
+    /// the normal restore path. Called periodically as a safety net.
+    /// </summary>
+    public void CleanupEmptyDesktops()
+    {
+        var entries = _tracker.GetAll();
+        foreach (var entry in entries)
+        {
+            // Closed windows are handled by CleanupStaleEntries.
+            if (!NativeMethods.IsWindow(entry.Hwnd)) continue;
+
+            var currentDesktopId = _vds.GetDesktopIdForWindow(entry.Hwnd);
+            if (currentDesktopId == null || currentDesktopId.Value == entry.TempDesktopId) continue;
+
+            Trace.WriteLine($"FullScreenManager: Window {entry.Hwnd} left temp desktop {entry.TempDesktopId}, removing empty desktop.");
+            if (_releasedDesktops.Add(entry.TempDesktopId))
+            {
+                _vds.RemoveDesktop(entry.TempDesktop);
+                Marshal.ReleaseComObject(entry.TempDesktop);
+            }
+            _tracker.Untrack(entry.Hwnd);
+        }
+    }
+
+    /// <summary>
     /// Toggle pin/unpin of a window to all virtual desktops.
     /// </summary>
     public void PinToggle(IntPtr hwnd)

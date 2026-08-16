@@ -9,21 +9,33 @@ namespace MaximizeToVirtualDesktop;
 /// A timer scans top-level windows and pins those that are visible, not minimized,
 /// and not maximized. Windows pinned by this service are tracked so they can be
 /// unpinned when the feature is turned off.
+///
+/// To avoid pin windows stacking on top of fullscreen windows after a desktop switch,
+/// this service also watches for desktop changes: when switching to a non-fullscreen
+/// desktop it temporarily unpins that desktop's foreground window, and re-pins it when
+/// switching back to a fullscreen desktop.
 /// </summary>
 internal sealed class AutoPinService : IDisposable
 {
     private readonly VirtualDesktopService _vds;
+    private readonly FullScreenTracker _tracker;
     private readonly Control _syncControl;
-    private readonly System.Windows.Forms.Timer _timer;
+    private readonly System.Windows.Forms.Timer _scanTimer;
+    private readonly System.Windows.Forms.Timer _desktopSwitchTimer;
     private readonly HashSet<IntPtr> _autoPinned = new();
+    private readonly HashSet<IntPtr> _temporarilyUnpinned = new();
+    private Guid? _lastDesktopId;
     private bool _enabled;
 
-    public AutoPinService(VirtualDesktopService vds, Control syncControl)
+    public AutoPinService(VirtualDesktopService vds, FullScreenTracker tracker, Control syncControl)
     {
         _vds = vds;
+        _tracker = tracker;
         _syncControl = syncControl;
-        _timer = new System.Windows.Forms.Timer { Interval = 1500 };
-        _timer.Tick += (_, _) => Scan();
+        _scanTimer = new System.Windows.Forms.Timer { Interval = 1500 };
+        _scanTimer.Tick += (_, _) => Scan();
+        _desktopSwitchTimer = new System.Windows.Forms.Timer { Interval = 200 };
+        _desktopSwitchTimer.Tick += (_, _) => DetectDesktopSwitch();
     }
 
     public bool Enabled => _enabled;
@@ -35,16 +47,90 @@ internal sealed class AutoPinService : IDisposable
 
         if (enabled)
         {
+            _lastDesktopId = _vds.GetCurrentDesktopId();
             Scan();
-            _timer.Start();
+            _scanTimer.Start();
+            _desktopSwitchTimer.Start();
             Trace.WriteLine("AutoPinService: Enabled.");
         }
         else
         {
-            _timer.Stop();
+            _scanTimer.Stop();
+            _desktopSwitchTimer.Stop();
             UnpinAll();
+            _temporarilyUnpinned.Clear();
             Trace.WriteLine("AutoPinService: Disabled.");
         }
+    }
+
+    private void DetectDesktopSwitch()
+    {
+        var currentId = _vds.GetCurrentDesktopId();
+        if (currentId == null || currentId == _lastDesktopId) return;
+        _lastDesktopId = currentId;
+        OnDesktopSwitched(currentId.Value);
+    }
+
+    private void OnDesktopSwitched(Guid newDesktopId)
+    {
+        if (IsFullScreenDesktop(newDesktopId))
+        {
+            RestoreTemporarilyUnpinned();
+        }
+        else
+        {
+            ScheduleUnpinForeground();
+        }
+    }
+
+    private bool IsFullScreenDesktop(Guid desktopId)
+    {
+        foreach (var entry in _tracker.GetAll())
+        {
+            if (entry.TempDesktopId == desktopId) return true;
+        }
+        return false;
+    }
+
+    private void ScheduleUnpinForeground()
+    {
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(150);
+            if (_syncControl.IsDisposed || !_syncControl.IsHandleCreated) return;
+            try
+            {
+                _syncControl.BeginInvoke(() =>
+                {
+                    var fg = NativeMethods.GetForegroundWindow();
+                    if (fg == IntPtr.Zero || fg == _syncControl.Handle) return;
+                    if (_autoPinned.Contains(fg))
+                    {
+                        _vds.UnpinWindow(fg);
+                        _autoPinned.Remove(fg);
+                        _temporarilyUnpinned.Add(fg);
+                        Trace.WriteLine($"AutoPinService: Temporarily unpinned foreground window {fg}.");
+                    }
+                });
+            }
+            catch (ObjectDisposedException) { }
+        });
+    }
+
+    private void RestoreTemporarilyUnpinned()
+    {
+        foreach (var hwnd in _temporarilyUnpinned)
+        {
+            if (NativeMethods.IsWindow(hwnd) && !_vds.IsWindowPinned(hwnd))
+            {
+                if (_vds.PinWindow(hwnd))
+                {
+                    _autoPinned.Add(hwnd);
+                    Trace.WriteLine($"AutoPinService: Re-pinned window {hwnd}.");
+                }
+            }
+        }
+        _temporarilyUnpinned.Clear();
     }
 
     private void Scan()
@@ -56,7 +142,9 @@ internal sealed class AutoPinService : IDisposable
             if (ShouldPin(hwnd))
             {
                 currentWindows.Add(hwnd);
-                if (!_autoPinned.Contains(hwnd) && !_vds.IsWindowPinned(hwnd))
+                if (!_autoPinned.Contains(hwnd)
+                    && !_temporarilyUnpinned.Contains(hwnd)
+                    && !_vds.IsWindowPinned(hwnd))
                 {
                     if (_vds.PinWindow(hwnd))
                     {
@@ -125,8 +213,11 @@ internal sealed class AutoPinService : IDisposable
 
     public void Dispose()
     {
-        _timer.Stop();
-        _timer.Dispose();
+        _scanTimer.Stop();
+        _scanTimer.Dispose();
+        _desktopSwitchTimer.Stop();
+        _desktopSwitchTimer.Dispose();
         UnpinAll();
+        _temporarilyUnpinned.Clear();
     }
 }

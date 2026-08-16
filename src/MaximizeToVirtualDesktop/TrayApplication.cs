@@ -28,6 +28,7 @@ internal sealed class TrayApplication : Form
     private readonly MaximizeButtonHook _mouseHook;
     private readonly AutoPinService _autoPin;
     private readonly System.Windows.Forms.Timer _cleanupTimer;
+    private readonly System.Windows.Forms.Timer _emptyDesktopTimer;
     private System.Windows.Forms.Timer? _retryTimer;
     private ToolStripMenuItem _autoPinItem = null!;
 
@@ -55,7 +56,7 @@ internal sealed class TrayApplication : Form
         _manager = new FullScreenManager(_vds, _tracker, _settings, this);
         _monitor = new WindowMonitor(_manager, _tracker, this, _settings);
         _mouseHook = new MaximizeButtonHook(_manager, this, _settings);
-        _autoPin = new AutoPinService(_vds, this);
+        _autoPin = new AutoPinService(_vds, _tracker, this);
 
         // System tray icon
         _trayIcon = new NotifyIcon
@@ -69,6 +70,10 @@ internal sealed class TrayApplication : Form
         // Periodic cleanup of stale entries (every 30 seconds)
         _cleanupTimer = new System.Windows.Forms.Timer { Interval = 30_000 };
         _cleanupTimer.Tick += (_, _) => _manager.CleanupStaleEntries();
+
+        // Periodic cleanup of empty fullscreen desktops (every 60 seconds)
+        _emptyDesktopTimer = new System.Windows.Forms.Timer { Interval = 60_000 };
+        _emptyDesktopTimer.Tick += (_, _) => _manager.CleanupEmptyDesktops();
     }
 
     protected override void OnHandleCreated(EventArgs e)
@@ -155,6 +160,7 @@ internal sealed class TrayApplication : Form
         _monitor.Start();
         _mouseHook.Install();
         _cleanupTimer.Start();
+        _emptyDesktopTimer.Start();
 
         // Register hotkey if not already registered
         if (!NativeMethods.RegisterHotKey(Handle, HOTKEY_ID,
@@ -776,6 +782,9 @@ internal sealed class TrayApplication : Form
 
         _cleanupTimer.Stop();
         _cleanupTimer.Dispose();
+
+        _emptyDesktopTimer.Stop();
+        _emptyDesktopTimer.Dispose();
 
         // Restore all tracked windows before exiting
         _manager.RestoreAll();
