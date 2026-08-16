@@ -217,8 +217,22 @@ internal sealed class WindowMonitor : IDisposable
         if (idObject != NativeMethods.OBJID_WINDOW || idChild != 0) return;
         if (!_tracker.IsTracked(hwnd)) return;
 
-        Trace.WriteLine($"WindowMonitor: Tracked window {hwnd} hidden, cleaning up.");
-        MarshalToUiThread(() => _manager.HandleWindowDestroyed(hwnd));
+        // A desktop switch also fires EVENT_OBJECT_HIDE for windows on other desktops,
+        // so a hide alone doesn't mean the window was closed. Verify the handle is
+        // actually gone shortly after before cleaning up.
+        Trace.WriteLine($"WindowMonitor: Tracked window {hwnd} hidden, verifying if closed.");
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(300);
+            MarshalToUiThread(() =>
+            {
+                if (_tracker.IsTracked(hwnd) && !NativeMethods.IsWindow(hwnd))
+                {
+                    Trace.WriteLine($"WindowMonitor: Tracked window {hwnd} confirmed closed after hide.");
+                    _manager.HandleWindowDestroyed(hwnd);
+                }
+            });
+        });
     }
 
     private void MarshalToUiThread(Action action)

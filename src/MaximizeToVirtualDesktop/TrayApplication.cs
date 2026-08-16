@@ -56,7 +56,7 @@ internal sealed class TrayApplication : Form
         _manager = new FullScreenManager(_vds, _tracker, _settings, this);
         _monitor = new WindowMonitor(_manager, _tracker, this, _settings);
         _mouseHook = new MaximizeButtonHook(_manager, this, _settings);
-        _autoPin = new AutoPinService(_vds, _tracker, this);
+        _autoPin = new AutoPinService(_vds, this);
 
         // System tray icon
         _trayIcon = new NotifyIcon

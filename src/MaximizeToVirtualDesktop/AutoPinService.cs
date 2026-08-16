@@ -10,32 +10,28 @@ namespace MaximizeToVirtualDesktop;
 /// and not maximized. Windows pinned by this service are tracked so they can be
 /// unpinned when the feature is turned off.
 ///
-/// To avoid pin windows stacking on top of fullscreen windows after a desktop switch,
-/// this service also watches for desktop changes: when switching to a non-fullscreen
-/// desktop it temporarily unpins that desktop's foreground window, and re-pins it when
-/// switching back to a fullscreen desktop.
+/// The foreground window is temporarily unpinned so it stays on the current desktop
+/// (instead of appearing on every desktop). When it loses focus it is re-pinned.
 /// </summary>
 internal sealed class AutoPinService : IDisposable
 {
     private readonly VirtualDesktopService _vds;
-    private readonly FullScreenTracker _tracker;
     private readonly Control _syncControl;
     private readonly System.Windows.Forms.Timer _scanTimer;
-    private readonly System.Windows.Forms.Timer _desktopSwitchTimer;
+    private readonly System.Windows.Forms.Timer _foregroundTimer;
     private readonly HashSet<IntPtr> _autoPinned = new();
     private readonly HashSet<IntPtr> _temporarilyUnpinned = new();
-    private Guid? _lastDesktopId;
+    private IntPtr _lastForeground;
     private bool _enabled;
 
-    public AutoPinService(VirtualDesktopService vds, FullScreenTracker tracker, Control syncControl)
+    public AutoPinService(VirtualDesktopService vds, Control syncControl)
     {
         _vds = vds;
-        _tracker = tracker;
         _syncControl = syncControl;
         _scanTimer = new System.Windows.Forms.Timer { Interval = 1500 };
         _scanTimer.Tick += (_, _) => Scan();
-        _desktopSwitchTimer = new System.Windows.Forms.Timer { Interval = 200 };
-        _desktopSwitchTimer.Tick += (_, _) => DetectDesktopSwitch();
+        _foregroundTimer = new System.Windows.Forms.Timer { Interval = 200 };
+        _foregroundTimer.Tick += (_, _) => DetectForegroundChange();
     }
 
     public bool Enabled => _enabled;
@@ -47,90 +43,59 @@ internal sealed class AutoPinService : IDisposable
 
         if (enabled)
         {
-            _lastDesktopId = _vds.GetCurrentDesktopId();
             Scan();
             _scanTimer.Start();
-            _desktopSwitchTimer.Start();
+            _foregroundTimer.Start();
+            _lastForeground = NativeMethods.GetForegroundWindow();
+            // Unpin the current foreground window so it stays on the current desktop.
+            UnpinForeground(_lastForeground);
             Trace.WriteLine("AutoPinService: Enabled.");
         }
         else
         {
             _scanTimer.Stop();
-            _desktopSwitchTimer.Stop();
+            _foregroundTimer.Stop();
             UnpinAll();
             _temporarilyUnpinned.Clear();
             Trace.WriteLine("AutoPinService: Disabled.");
         }
     }
 
-    private void DetectDesktopSwitch()
+    private void DetectForegroundChange()
     {
-        var currentId = _vds.GetCurrentDesktopId();
-        if (currentId == null || currentId == _lastDesktopId) return;
-        _lastDesktopId = currentId;
-        OnDesktopSwitched(currentId.Value);
-    }
+        var fg = NativeMethods.GetForegroundWindow();
+        if (fg == _lastForeground) return;
+        var prev = _lastForeground;
+        _lastForeground = fg;
 
-    private void OnDesktopSwitched(Guid newDesktopId)
-    {
-        if (IsFullScreenDesktop(newDesktopId))
+        // Re-pin the previous foreground window (now in the background).
+        if (prev != IntPtr.Zero && _temporarilyUnpinned.Remove(prev))
         {
-            RestoreTemporarilyUnpinned();
-        }
-        else
-        {
-            ScheduleUnpinForeground();
-        }
-    }
-
-    private bool IsFullScreenDesktop(Guid desktopId)
-    {
-        foreach (var entry in _tracker.GetAll())
-        {
-            if (entry.TempDesktopId == desktopId) return true;
-        }
-        return false;
-    }
-
-    private void ScheduleUnpinForeground()
-    {
-        _ = Task.Run(async () =>
-        {
-            await Task.Delay(150);
-            if (_syncControl.IsDisposed || !_syncControl.IsHandleCreated) return;
-            try
+            if (NativeMethods.IsWindow(prev) && ShouldPin(prev) && !_vds.IsWindowPinned(prev))
             {
-                _syncControl.BeginInvoke(() =>
+                if (_vds.PinWindow(prev))
                 {
-                    var fg = NativeMethods.GetForegroundWindow();
-                    if (fg == IntPtr.Zero || fg == _syncControl.Handle) return;
-                    if (_autoPinned.Contains(fg))
-                    {
-                        _vds.UnpinWindow(fg);
-                        _autoPinned.Remove(fg);
-                        _temporarilyUnpinned.Add(fg);
-                        Trace.WriteLine($"AutoPinService: Temporarily unpinned foreground window {fg}.");
-                    }
-                });
-            }
-            catch (ObjectDisposedException) { }
-        });
-    }
-
-    private void RestoreTemporarilyUnpinned()
-    {
-        foreach (var hwnd in _temporarilyUnpinned)
-        {
-            if (NativeMethods.IsWindow(hwnd) && !_vds.IsWindowPinned(hwnd))
-            {
-                if (_vds.PinWindow(hwnd))
-                {
-                    _autoPinned.Add(hwnd);
-                    Trace.WriteLine($"AutoPinService: Re-pinned window {hwnd}.");
+                    _autoPinned.Add(prev);
+                    Trace.WriteLine($"AutoPinService: Re-pinned window {prev}.");
                 }
             }
         }
-        _temporarilyUnpinned.Clear();
+
+        // Unpin the new foreground window.
+        UnpinForeground(fg);
+    }
+
+    private void UnpinForeground(IntPtr fg)
+    {
+        if (fg == IntPtr.Zero || fg == _syncControl.Handle) return;
+        if (!_autoPinned.Contains(fg)) return;
+
+        if (_vds.UnpinWindow(fg))
+        {
+            _autoPinned.Remove(fg);
+            _temporarilyUnpinned.Add(fg);
+            Trace.WriteLine($"AutoPinService: Temporarily unpinned foreground window {fg}.");
+        }
     }
 
     private void Scan()
@@ -215,8 +180,8 @@ internal sealed class AutoPinService : IDisposable
     {
         _scanTimer.Stop();
         _scanTimer.Dispose();
-        _desktopSwitchTimer.Stop();
-        _desktopSwitchTimer.Dispose();
+        _foregroundTimer.Stop();
+        _foregroundTimer.Dispose();
         UnpinAll();
         _temporarilyUnpinned.Clear();
     }
