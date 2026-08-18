@@ -28,6 +28,8 @@ internal sealed class WindowMonitor : IDisposable
     private IntPtr _moveSizeEndHook;
     // Track windows that have been maximized but need to wait for resize end
     private readonly HashSet<IntPtr> _pendingMaximize = new();
+    private readonly Dictionary<IntPtr, long> _pendingHide = new();
+    private readonly System.Windows.Forms.Timer _hideTimer;
 
     public WindowMonitor(FullScreenManager manager, FullScreenTracker tracker, Control syncControl, AppSettings settings)
     {
@@ -40,6 +42,9 @@ internal sealed class WindowMonitor : IDisposable
         _destroyProc = OnDestroy;
         _hideProc = OnHide;
         _moveSizeEndProc = OnMoveSizeEnd;
+
+        _hideTimer = new System.Windows.Forms.Timer { Interval = 100 };
+        _hideTimer.Tick += (_, _) => ProcessPendingHides();
     }
 
     public void Start()
@@ -74,7 +79,8 @@ internal sealed class WindowMonitor : IDisposable
             IntPtr.Zero, _hideProc,
             0, 0, NativeMethods.WINEVENT_OUTOFCONTEXT);
 
-        if (_locationChangeHook == IntPtr.Zero || _destroyHook == IntPtr.Zero)
+        if (_locationChangeHook == IntPtr.Zero || _moveSizeEndHook == IntPtr.Zero
+            || _destroyHook == IntPtr.Zero || _hideHook == IntPtr.Zero)
         {
             Trace.WriteLine("WindowMonitor: Failed to set one or more WinEvent hooks.");
         }
@@ -193,11 +199,11 @@ internal sealed class WindowMonitor : IDisposable
         var placement = NativeMethods.WINDOWPLACEMENT.Default;
         if (!NativeMethods.GetWindowPlacement(hwnd, ref placement)) return;
         Trace.WriteLine($"WindowMonitor: MoveSizeEnd: tracked window {hwnd} showCmd={placement.showCmd}.");
-        if (placement.showCmd != NativeMethods.SW_MAXIMIZE && !NativeMethods.IsIconic(hwnd))
+        if (placement.showCmd != NativeMethods.SW_MAXIMIZE)
         {
             Trace.WriteLine($"WindowMonitor: Tracked window {hwnd} un-maximized via move/size, restoring.");
             await Task.Delay(100);
-            MarshalToUiThread(() => _manager.Restore(hwnd));
+            MarshalToUiThread(() => _manager.Restore(hwnd, keepMinimized: NativeMethods.IsIconic(hwnd)));
         }
     }
 
@@ -208,7 +214,11 @@ internal sealed class WindowMonitor : IDisposable
         if (!_tracker.IsTracked(hwnd)) return;
 
         Trace.WriteLine($"WindowMonitor: Tracked window {hwnd} destroyed.");
-        MarshalToUiThread(() => _manager.HandleWindowDestroyed(hwnd));
+        MarshalToUiThread(() =>
+        {
+            _pendingHide.Remove(hwnd);
+            _manager.HandleWindowDestroyed(hwnd);
+        });
     }
 
     private void OnHide(IntPtr hWinEventHook, uint eventType, IntPtr hwnd,
@@ -217,13 +227,46 @@ internal sealed class WindowMonitor : IDisposable
         if (idObject != NativeMethods.OBJID_WINDOW || idChild != 0) return;
         if (!_tracker.IsTracked(hwnd)) return;
 
-        Trace.WriteLine($"WindowMonitor: Tracked window {hwnd} hidden, cleaning up.");
-        MarshalToUiThread(() => _manager.HandleWindowDestroyed(hwnd));
+        MarshalToUiThread(() =>
+        {
+            _pendingHide[hwnd] = Environment.TickCount64 + 300;
+            _hideTimer.Start();
+        });
+    }
+
+    private void ProcessPendingHides()
+    {
+        var now = Environment.TickCount64;
+        var due = _pendingHide
+            .Where(item => item.Value <= now)
+            .Select(item => item.Key)
+            .ToList();
+
+        foreach (var hwnd in due)
+        {
+            _pendingHide.Remove(hwnd);
+            if (!_tracker.IsTracked(hwnd) || NativeMethods.IsWindowVisible(hwnd)) continue;
+
+            if (NativeMethods.IsWindow(hwnd))
+            {
+                Trace.WriteLine($"WindowMonitor: Tracked window {hwnd} remained hidden, restoring in place.");
+                _manager.Restore(hwnd, keepHidden: true);
+                if (_tracker.IsTracked(hwnd))
+                    _pendingHide[hwnd] = Environment.TickCount64 + 5000;
+            }
+            else
+            {
+                _manager.HandleWindowDestroyed(hwnd);
+            }
+        }
+
+        if (_pendingHide.Count == 0)
+            _hideTimer.Stop();
     }
 
     private void MarshalToUiThread(Action action)
     {
-        if (_syncControl.IsDisposed || !_syncControl.IsHandleCreated) return;
+        if (_disposed || _syncControl.IsDisposed || !_syncControl.IsHandleCreated) return;
 
         try
         {
@@ -260,6 +303,10 @@ internal sealed class WindowMonitor : IDisposable
             NativeMethods.UnhookWinEvent(_moveSizeEndHook);
             _moveSizeEndHook = IntPtr.Zero;
         }
+
+        _hideTimer.Stop();
+        _hideTimer.Dispose();
+        _pendingHide.Clear();
 
         Trace.WriteLine("WindowMonitor: Disposed.");
     }

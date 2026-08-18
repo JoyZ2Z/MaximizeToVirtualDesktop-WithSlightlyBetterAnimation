@@ -49,6 +49,11 @@ internal static partial class NativeMethods
     internal static extern IntPtr WindowFromPoint(POINT point);
 
     [DllImport("user32.dll")]
+    internal static extern IntPtr GetAncestor(IntPtr hwnd, uint gaFlags);
+
+    internal const uint GA_ROOT = 2;
+
+    [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
 
@@ -72,15 +77,6 @@ internal static partial class NativeMethods
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool IsIconic(IntPtr hWnd);
-
-    [DllImport("user32.dll")]
-    internal static extern uint GetDoubleClickTime();
-
-    [DllImport("user32.dll")]
-    internal static extern int GetSystemMetrics(int nIndex);
-
-    [DllImport("user32.dll")]
-    internal static extern IntPtr SetFocus(IntPtr hWnd);
 
     internal const int VK_LBUTTON = 0x01;
 
@@ -197,7 +193,10 @@ internal static partial class NativeMethods
     internal const int SW_MAXIMIZE = 3;
     internal const int SW_RESTORE = 9;
     internal const int SW_MINIMIZE = 6;
+    internal const uint SW_HIDE = 0;
+    internal const uint SW_SHOWMINNOACTIVE = 7;
     internal const int SW_SHOWNOACTIVATE = 4;
+    internal const uint WPF_RESTORETOMAXIMIZED = 0x0002;
 
     internal const uint WM_HOTKEY = 0x0312;
     internal const uint WM_NCHITTEST = 0x0084;
@@ -207,12 +206,6 @@ internal static partial class NativeMethods
     internal static readonly IntPtr SC_MAXIMIZE = new IntPtr(0xF030);
 
     internal const int HTMAXBUTTON = 9;
-    internal const int HTCAPTION = 2;
-    internal const int HTSYSMENU = 3;
-    internal const int HTMENU = 5;
-
-    internal const int SM_CXDOUBLECLK = 36;
-    internal const int SM_CYDOUBLECLK = 37;
 
     internal const int WH_MOUSE_LL = 14;
     internal const int HC_ACTION = 0;
