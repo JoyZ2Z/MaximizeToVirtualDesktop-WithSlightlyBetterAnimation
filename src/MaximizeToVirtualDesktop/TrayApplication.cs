@@ -23,20 +23,44 @@ internal sealed class TrayApplication : Form
     private readonly NotifyIcon _trayIcon;
     private readonly VirtualDesktopService _vds;
     private readonly FullScreenTracker _tracker;
+    private readonly SnapWorkspaceTracker _snapTracker;
+    private readonly SnapWorkspaceService _snapWorkspaceService;
     private readonly FullScreenManager _manager;
     private readonly WindowMonitor _monitor;
     private readonly MaximizeButtonHook _mouseHook;
     private readonly AutoPinService _autoPin;
     private readonly System.Windows.Forms.Timer _cleanupTimer;
     private readonly System.Windows.Forms.Timer _emptyDesktopTimer;
+    private readonly System.Windows.Forms.Timer _desktopOrderTimer;
     private System.Windows.Forms.Timer? _retryTimer;
-    private ToolStripMenuItem _autoPinItem = null!;
+    private System.Windows.Forms.Timer? _sortTimer;
+    private ToolStripMenuItem _autoPinModeItem = null!;
+    private ToolStripMenuItem _autoPinOffItem = null!;
+    private ToolStripMenuItem _autoPinOnItem = null!;
+    private ToolStripMenuItem _autoPinTrackWindowsItem = null!;
+    private ToolStripMenuItem _autoSortItem = null!;
+    private readonly List<Guid> _desktopMru = new();
+    private Guid? _mainDesktopId;
+    private Guid? _currentDesktopId;
+    private Guid? _confirmedDesktopId;
+    private DateTime _desktopEnterTime;
+    private DateTime _sortFreezeUntil;
 
     internal static readonly UpdatumManager Updater = new("shanselman", "MaximizeToVirtualDesktop")
     {
         FetchOnlyLatestRelease = true,
         InstallUpdateSingleFileExecutableName = "MaximizeToVirtualDesktop",
     };
+
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            var parameters = base.CreateParams;
+            parameters.ExStyle |= 0x00000080; // WS_EX_TOOLWINDOW: keep the hidden tray host out of Alt+Tab.
+            return parameters;
+        }
+    }
 
     public TrayApplication()
     {
@@ -53,11 +77,15 @@ internal sealed class TrayApplication : Form
         // Initialize components
         _vds = new VirtualDesktopService();
         _tracker = new FullScreenTracker();
-        _manager = new FullScreenManager(_vds, _tracker, _settings, this);
-        _monitor = new WindowMonitor(_manager, _tracker, this, _settings);
+        _snapTracker = new SnapWorkspaceTracker();
+        _autoPin = new AutoPinService(
+            _vds, _tracker, _snapTracker, this, () => _mainDesktopId);
+        _manager = new FullScreenManager(_vds, _tracker, _settings, this, _autoPin);
+        _snapWorkspaceService = new SnapWorkspaceService(
+            _vds, _tracker, _snapTracker, _autoPin, this, () => _mainDesktopId);
+        _monitor = new WindowMonitor(
+            _manager, _tracker, _snapWorkspaceService, _vds, this, _settings);
         _mouseHook = new MaximizeButtonHook(_manager, this, _settings);
-        _autoPin = new AutoPinService(_vds, this);
-        _manager.AutoPin = _autoPin;
 
         // System tray icon
         _trayIcon = new NotifyIcon
@@ -75,6 +103,11 @@ internal sealed class TrayApplication : Form
         // Periodic cleanup of empty fullscreen desktops (every 60 seconds)
         _emptyDesktopTimer = new System.Windows.Forms.Timer { Interval = 60_000 };
         _emptyDesktopTimer.Tick += (_, _) => _manager.CleanupEmptyDesktops();
+
+        // MRU ordering does not require animation-frame precision. Keep this
+        // as a low-cost fallback behind the desktop-switch event pipeline.
+        _desktopOrderTimer = new System.Windows.Forms.Timer { Interval = 500 };
+        _desktopOrderTimer.Tick += (_, _) => TrackDesktopUsage();
     }
 
     protected override void OnHandleCreated(EventArgs e)
@@ -144,6 +177,17 @@ internal sealed class TrayApplication : Form
         // Recover orphaned desktops from a previous crash
         RecoverOrphanedDesktops();
 
+        // Initialize desktop MRU tracking (pure MRU, no fixed main-desktop anchor)
+        _currentDesktopId = _vds.GetCurrentDesktopId();
+        _desktopEnterTime = DateTime.UtcNow;
+        EnsureMainDesktop();
+
+        // If auto-sort is enabled, apply it once on startup.
+        if (_settings.AutoSortEnabled)
+        {
+            ScheduleSort();
+        }
+
         // Start monitoring
         StartMonitoring();
 
@@ -159,9 +203,11 @@ internal sealed class TrayApplication : Form
     private void StartMonitoring()
     {
         _monitor.Start();
+        _snapWorkspaceService.Start();
         _mouseHook.Install();
         _cleanupTimer.Start();
         _emptyDesktopTimer.Start();
+        _desktopOrderTimer.Start();
 
         // Register hotkey if not already registered
         if (!NativeMethods.RegisterHotKey(Handle, HOTKEY_ID,
@@ -229,12 +275,13 @@ internal sealed class TrayApplication : Form
             Trace.WriteLine($"TrayApplication: Registered auto-pin hotkey {FormatHotkey(_settings.AutoPinHotkeyModifiers, _settings.AutoPinHotkeyKey)}");
         }
 
-        // Restore persisted auto-pin state
-        if (_settings.AutoPinEnabled)
-        {
-            _autoPin.SetEnabled(true);
-            UpdateAutoPinMenuItem();
-        }
+        // Resolve legacy boolean settings to the equivalent explicit mode.
+        var autoPinMode = _settings.ResolveAutoPinMode();
+        _settings.SetAutoPinMode(autoPinMode);
+        _settings.Save();
+        if (autoPinMode != AutoPinMode.Off)
+            _autoPin.SetMode(autoPinMode);
+        UpdateAutoPinMenuItems();
     }
 
     protected override void WndProc(ref Message m)
@@ -277,6 +324,7 @@ internal sealed class TrayApplication : Form
             // Windows destroys all virtual desktops on Explorer restart —
             // our tracked COM refs are now stale and must be released.
             _tracker.ClearAll();
+            _snapTracker.ClearAll();
 
             if (_vds.Reinitialize() && !_comInitialized)
             {
@@ -379,25 +427,256 @@ internal sealed class TrayApplication : Form
             return;
         }
 
-        var enabled = !_autoPin.Enabled;
-        _autoPin.SetEnabled(enabled);
-        UpdateAutoPinMenuItem();
-        _settings.AutoPinEnabled = enabled;
-        _settings.Save();
-        _trayIcon.Text = BuildTooltipText();
-        NotificationOverlay.ShowNotification(
-            enabled ? "📌 Auto-pin Enabled" : "📌 Auto-pin Disabled",
-            enabled ? "Non-fullscreen windows pinned to all desktops" : "Previously pinned windows restored",
-            IntPtr.Zero);
-        Trace.WriteLine($"TrayApplication: Auto-pin {(enabled ? "enabled" : "disabled")}.");
+        var next = AutoPinModePolicy.Toggle(
+            _autoPin.RequestedMode, _settings.LastEnabledAutoPinMode);
+        SelectAutoPinMode(next);
     }
 
-    private void UpdateAutoPinMenuItem()
+    private void SelectAutoPinMode(AutoPinMode mode)
     {
-        _autoPinItem.Checked = _autoPin.Enabled;
-        _autoPinItem.Text = _autoPin.Enabled
-            ? "Auto-pin Non-fullscreen Windows: ON"
-            : "Auto-pin Non-fullscreen Windows: OFF";
+        if (!_comInitialized)
+        {
+            Trace.WriteLine($"TrayApplication: Cannot select AutoPin mode {mode}; COM unavailable.");
+            return;
+        }
+
+        _autoPin.SetMode(mode);
+        _settings.SetAutoPinMode(mode);
+        _settings.Save();
+        UpdateAutoPinMenuItems();
+        _trayIcon.Text = BuildTooltipText();
+
+        var (title, message) = mode switch
+        {
+            AutoPinMode.On => ("📌 Auto-pin On",
+                "Active desktop sessions are managed globally and minimized when covered"),
+            AutoPinMode.TrackWindows => ("📌 Auto-pin On-TrackWindows",
+                "Windows are tracked by their desktop visibility state"),
+            _ => ("📌 Auto-pin Off", "Known pin states are being restored"),
+        };
+        NotificationOverlay.ShowNotification(title, message, IntPtr.Zero);
+        Trace.WriteLine($"TrayApplication: Auto-pin mode selected: {mode}.");
+    }
+
+    private void UpdateAutoPinMenuItems()
+    {
+        var mode = _autoPin.RequestedMode;
+        _autoPinOffItem.Checked = mode == AutoPinMode.Off;
+        _autoPinOnItem.Checked = mode == AutoPinMode.On;
+        _autoPinTrackWindowsItem.Checked = mode == AutoPinMode.TrackWindows;
+        _autoPinModeItem.Text = $"Auto-pin: {ModeDisplayName(mode)}";
+    }
+
+    private static string ModeDisplayName(AutoPinMode mode) => mode switch
+    {
+        AutoPinMode.On => "On",
+        AutoPinMode.TrackWindows => "On-TrackWindows",
+        _ => "Off",
+    };
+
+    private void ToggleAutoSort()
+    {
+        var enabled = !_settings.AutoSortEnabled;
+        _settings.AutoSortEnabled = enabled;
+        _settings.Save();
+        UpdateAutoSortMenuItem();
+
+        if (enabled)
+        {
+            // Apply the current MRU order immediately.
+            ScheduleSort();
+        }
+
+        NotificationOverlay.ShowNotification(
+            enabled ? "↔ Auto-sort Enabled" : "↔ Auto-sort Disabled",
+            enabled ? "Desktops reorder by recent use" : "Desktop order left unchanged",
+            IntPtr.Zero);
+        Trace.WriteLine($"TrayApplication: Auto-sort {(enabled ? "enabled" : "disabled")}.");
+    }
+
+    private void UpdateAutoSortMenuItem()
+    {
+        _autoSortItem.Checked = _settings.AutoSortEnabled;
+        _autoSortItem.Text = _settings.AutoSortEnabled
+            ? "Auto-sort Desktops by Recent Use: ON"
+            : "Auto-sort Desktops by Recent Use: OFF";
+    }
+
+    private void EnsureMainDesktop(List<Guid>? allDesktopIds = null)
+    {
+        var ids = allDesktopIds ?? _vds.GetAllDesktopIds();
+        if (ids.Count == 0) return;
+
+        if (_mainDesktopId.HasValue && ids.Contains(_mainDesktopId.Value)) return;
+
+        var persistedMain = _settings.MainDesktopId;
+        _mainDesktopId = persistedMain.HasValue && ids.Contains(persistedMain.Value)
+            ? persistedMain.Value
+            : ids[0];
+        _settings.MainDesktopId = _mainDesktopId;
+        _settings.Save();
+        _desktopMru.Remove(_mainDesktopId.Value);
+        Trace.WriteLine($"TrayApplication: Desktop 1 is {_mainDesktopId}.");
+    }
+
+    private void RecordMru(Guid desktopId)
+    {
+        if (_mainDesktopId == desktopId) return;
+        _desktopMru.Remove(desktopId);
+        _desktopMru.Insert(0, desktopId);
+    }
+
+    /// <summary>
+    /// Tracks desktop switches to maintain a most-recently-used order.
+    /// Desktops visited for less than 3 seconds are treated as "passing through"
+    /// and are not recorded as recent use.
+    /// </summary>
+    private void TrackDesktopUsage()
+    {
+        var id = _vds.GetCurrentDesktopId();
+        if (id == null) return;
+
+        var now = DateTime.UtcNow;
+        bool switched = id != _currentDesktopId;
+
+        if (switched)
+        {
+            _sortFreezeUntil = now.AddMilliseconds(850);
+            // Record the previous desktop if we stayed there long enough.
+            var oldId = _currentDesktopId;
+            if (oldId != null
+                && (now - _desktopEnterTime).TotalSeconds >= _settings.MruThresholdSeconds)
+            {
+                RecordMru(oldId.Value);
+            }
+
+            _currentDesktopId = id;
+            _desktopEnterTime = now;
+            _confirmedDesktopId = null; // new desktop not yet confirmed as "used"
+        }
+
+        // Confirm the current desktop as recently used only after it has been visited
+        // for at least the threshold. A quick pass-through does not enter the MRU.
+        bool confirmed = false;
+        if (_settings.AutoSortEnabled
+            && _confirmedDesktopId != id
+            && (now - _desktopEnterTime).TotalSeconds >= _settings.MruThresholdSeconds)
+        {
+            _confirmedDesktopId = id;
+            RecordMru(id.Value);
+            confirmed = true;
+        }
+
+        if (_settings.AutoSortEnabled)
+        {
+            if (switched || confirmed)
+            {
+                ScheduleSort();
+            }
+        }
+        else if (switched)
+        {
+            ShowDesktopOrder();
+        }
+    }
+
+    /// <summary>
+    /// Defers sorting by 600ms so it runs after the desktop switch animation settles,
+    /// avoiding a race between MoveDesktop and the in-flight switch.
+    /// </summary>
+    private void ScheduleSort()
+    {
+        _sortTimer ??= new System.Windows.Forms.Timer { Interval = 600 };
+        _sortTimer.Tick -= OnSortTimerTick;
+        _sortTimer.Tick += OnSortTimerTick;
+        _sortTimer.Stop();
+        _sortTimer.Start();
+    }
+
+    private void OnSortTimerTick(object? sender, EventArgs e)
+    {
+        _sortTimer?.Stop();
+        SortDesktops();
+    }
+
+    /// <summary>
+    /// Reorders desktops: main desktop (desktop 1) stays first, then the rest by
+    /// most-recently-used order. Only desktops visited for at least the MRU threshold
+    /// are in the MRU list; the current desktop is NOT specially placed — it only moves
+    /// to the front once it has been confirmed (visited long enough).
+    /// </summary>
+    private void SortDesktops()
+    {
+        if (!_settings.AutoSortEnabled) return;
+        if (_autoPin.IsSuspended || _autoPin.IsTransitioning || DateTime.UtcNow < _sortFreezeUntil)
+        {
+            ScheduleSort();
+            return;
+        }
+
+        var allIds = _vds.GetAllDesktopIds();
+        if (allIds.Count < 2) return;
+
+        EnsureMainDesktop(allIds);
+        if (!_mainDesktopId.HasValue) return;
+        var target = DesktopOrderPolicy.CreateTargetOrder(_mainDesktopId.Value, _desktopMru, allIds);
+
+        // No-op if already in the target order.
+        bool alreadyOrdered = target.Count == allIds.Count;
+        if (alreadyOrdered)
+        {
+            for (int i = 0; i < target.Count; i++)
+            {
+                if (target[i] != allIds[i]) { alreadyOrdered = false; break; }
+            }
+        }
+
+        if (!alreadyOrdered)
+        {
+            // Guard: remember current desktop so we can switch back if sorting moves it.
+            var guardCurrent = _vds.GetCurrentDesktopId();
+
+            for (int i = 0; i < target.Count; i++)
+            {
+                _vds.MoveDesktopToIndex(target[i], i);
+            }
+
+            // Guard: if the current desktop got moved away, switch back to it.
+            var afterCurrent = _vds.GetCurrentDesktopId();
+            if (guardCurrent != null && afterCurrent != guardCurrent)
+            {
+                var desktop = _vds.FindDesktop(guardCurrent.Value);
+                if (desktop != null)
+                {
+                    try { _vds.SwitchToDesktop(desktop); }
+                    finally { Marshal.ReleaseComObject(desktop); }
+                }
+            }
+
+            Trace.WriteLine($"TrayApplication: Desktops sorted ({target.Count} desktops).");
+        }
+
+        ShowDesktopOrder();
+    }
+
+    /// <summary>
+    /// Shows a popup describing the current desktop order, highlighting the current desktop.
+    /// </summary>
+    private void ShowDesktopOrder()
+    {
+        var allIds = _vds.GetAllDesktopIds();
+        if (allIds.Count == 0) return;
+
+        var currentId = _vds.GetCurrentDesktopId();
+
+        var parts = new List<string>(allIds.Count);
+        for (int i = 0; i < allIds.Count; i++)
+        {
+            parts.Add(allIds[i] == currentId ? $"[{i + 1}]" : $"{i + 1}");
+        }
+
+        var order = string.Join("  ", parts);
+        NotificationOverlay.ShowNotification("桌面顺序", order, IntPtr.Zero);
     }
 
     private ContextMenuStrip BuildContextMenu()
@@ -421,14 +700,30 @@ internal sealed class TrayApplication : Form
         });
         menu.Items.Add(restoreAllItem);
 
-        _autoPinItem = new ToolStripMenuItem("Auto-pin Non-fullscreen Windows")
-        {
-            Checked = _settings.AutoPinEnabled,
-        };
-        _autoPinItem.Click += (_, _) => ToggleAutoPin();
-        menu.Items.Add(_autoPinItem);
+        _autoPinModeItem = new ToolStripMenuItem("Auto-pin");
+        _autoPinOffItem = new ToolStripMenuItem("Off");
+        _autoPinOnItem = new ToolStripMenuItem("On");
+        _autoPinTrackWindowsItem = new ToolStripMenuItem("On-TrackWindows");
+        _autoPinOffItem.Click += (_, _) => SelectAutoPinMode(AutoPinMode.Off);
+        _autoPinOnItem.Click += (_, _) => SelectAutoPinMode(AutoPinMode.On);
+        _autoPinTrackWindowsItem.Click += (_, _) =>
+            SelectAutoPinMode(AutoPinMode.TrackWindows);
+        _autoPinModeItem.DropDownItems.AddRange([
+            _autoPinOffItem,
+            _autoPinOnItem,
+            _autoPinTrackWindowsItem,
+        ]);
+        menu.Items.Add(_autoPinModeItem);
 
-        menu.Opening += (_, _) => UpdateAutoPinMenuItem();
+        _autoSortItem = new ToolStripMenuItem("Auto-sort Desktops by Recent Use")
+        {
+            Checked = _settings.AutoSortEnabled,
+        };
+        _autoSortItem.Click += (_, _) => ToggleAutoSort();
+        menu.Items.Add(_autoSortItem);
+
+        menu.Opening += (_, _) => UpdateAutoPinMenuItems();
+        menu.Opening += (_, _) => UpdateAutoSortMenuItem();
 
         menu.Items.Add(new ToolStripSeparator());
 
@@ -755,9 +1050,12 @@ internal sealed class TrayApplication : Form
     private void RecoverOrphanedDesktops()
     {
         var persisted = TrackerPersistence.Load();
-        if (persisted.Count == 0) return;
+        var snapPersisted = SnapWorkspacePersistence.Load();
+        if (persisted.Count == 0 && snapPersisted.Count == 0) return;
 
-        Trace.WriteLine($"TrayApplication: Found {persisted.Count} orphaned desktop(s) from previous session.");
+        Trace.WriteLine(
+            $"TrayApplication: Found {persisted.Count + snapPersisted.Count} "
+            + "orphaned desktop(s) from previous session.");
 
         foreach (var entry in persisted)
         {
@@ -770,7 +1068,23 @@ internal sealed class TrayApplication : Form
             }
         }
 
+        foreach (var entry in snapPersisted)
+        {
+            var desktop = _vds.FindDesktop(entry.TempDesktopId);
+            if (desktop != null)
+            {
+                Trace.WriteLine(
+                    $"TrayApplication: Removing orphaned Snap desktop {entry.TempDesktopId} "
+                    + $"({entry.MonitorId})");
+                var fallback = _mainDesktopId ?? _vds.GetAllDesktopIds().FirstOrDefault();
+                if (fallback != Guid.Empty) _vds.RemoveDesktop(desktop, fallback);
+                else _vds.RemoveDesktop(desktop);
+                Marshal.ReleaseComObject(desktop);
+            }
+        }
+
         TrackerPersistence.Delete();
+        SnapWorkspacePersistence.Delete();
         Trace.WriteLine("TrayApplication: Orphaned desktop recovery complete.");
     }
 
@@ -787,7 +1101,14 @@ internal sealed class TrayApplication : Form
         _emptyDesktopTimer.Stop();
         _emptyDesktopTimer.Dispose();
 
+        _desktopOrderTimer.Stop();
+        _desktopOrderTimer.Dispose();
+
+        _sortTimer?.Stop();
+        _sortTimer?.Dispose();
+
         // Restore all tracked windows before exiting
+        _snapWorkspaceService.RemoveAll();
         _manager.RestoreAll();
 
         // Clean up native resources
@@ -798,6 +1119,7 @@ internal sealed class TrayApplication : Form
         NativeMethods.UnregisterHotKey(Handle, HOTKEY_AUTOPIN_ID);
         _mouseHook.Dispose();
         _monitor.Dispose();
+        _snapWorkspaceService.Dispose();
         _autoPin.Dispose();
         _vds.Dispose();
 

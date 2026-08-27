@@ -27,6 +27,7 @@ internal sealed class SettingsDialog : Form
 
     private readonly CheckBox _chkInvertShiftClick;
     private readonly CheckBox _chkShowSwitchPopup;
+    private readonly NumericUpDown _numMruThreshold;
     private Button _btnStartup = null!;
 
     // (display name, VK code) pairs for the key combo boxes
@@ -94,7 +95,7 @@ internal sealed class SettingsDialog : Form
         y += grpAutoPin.Height + 12;
 
         // Behavior group
-        var grpBehavior = new GroupBox { Text = "Behavior", Location = new Point(margin, y), Size = new Size(grpW, 124) };
+        var grpBehavior = new GroupBox { Text = "Behavior", Location = new Point(margin, y), Size = new Size(grpW, 160) };
         Controls.Add(grpBehavior);
         _chkShowSwitchPopup = new CheckBox
         {
@@ -113,6 +114,22 @@ internal sealed class SettingsDialog : Form
             Location = new Point(10, 54),
         };
         grpBehavior.Controls.Add(_chkInvertShiftClick);
+        // MRU stay threshold
+        grpBehavior.Controls.Add(new Label
+        {
+            Text = "MRU stay threshold (seconds):",
+            AutoSize = true,
+            Location = new Point(10, 86),
+        });
+        _numMruThreshold = new NumericUpDown
+        {
+            Minimum = 1,
+            Maximum = 60,
+            Value = Math.Clamp(settings.MruThresholdSeconds, 1, 60),
+            Location = new Point(220, 82),
+            Size = new Size(60, 24),
+        };
+        grpBehavior.Controls.Add(_numMruThreshold);
         y += grpBehavior.Height + 12;
 
         // Manage Startup group
@@ -353,6 +370,7 @@ internal sealed class SettingsDialog : Form
         _settings.AutoPinHotkeyKey   = _cmbAutoPinKey.SelectedIndex >= 0 ? SupportedKeys[_cmbAutoPinKey.SelectedIndex].Vk : NativeMethods.VK_A;
         _settings.ShowSwitchPopup    = _chkShowSwitchPopup.Checked;
         _settings.InvertShiftClick   = _chkInvertShiftClick.Checked;
+        _settings.MruThresholdSeconds = (int)_numMruThreshold.Value;
     }
 
     private static uint BuildModifiers(CheckBox ctrl, CheckBox alt, CheckBox shift, CheckBox win)

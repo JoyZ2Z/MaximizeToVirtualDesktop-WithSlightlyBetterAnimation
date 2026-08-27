@@ -15,20 +15,20 @@ internal sealed class FullScreenManager
     private readonly FullScreenTracker _tracker;
     private readonly AppSettings _settings;
     private readonly Control _syncControl;
+    private readonly AutoPinService _autoPin;
     private readonly HashSet<IntPtr> _inFlight = new();
     // Track temp desktop COM refs that have already been released to prevent double-release.
     // Multiple tracked windows may share the same TempDesktop COM pointer.
     private readonly HashSet<Guid> _releasedDesktops = new();
 
-    /// <summary>Optional reference to the auto-pin service, used to suspend/resume pinning around desktop switches.</summary>
-    public AutoPinService? AutoPin { get; set; }
-
-    public FullScreenManager(VirtualDesktopService vds, FullScreenTracker tracker, AppSettings settings, Control syncControl)
+    public FullScreenManager(VirtualDesktopService vds, FullScreenTracker tracker, AppSettings settings,
+        Control syncControl, AutoPinService autoPin)
     {
         _vds = vds;
         _tracker = tracker;
         _settings = settings;
         _syncControl = syncControl;
+        _autoPin = autoPin;
     }
 
     /// <summary>
@@ -65,6 +65,9 @@ internal sealed class FullScreenManager
         }
     }
 
+    public bool IsTracked(IntPtr hwnd) => _tracker.IsTracked(hwnd);
+    public bool IsMutationInFlight(IntPtr hwnd) => _inFlight.Contains(hwnd);
+
     /// <summary>
     /// Maximize a window to a new virtual desktop. No-op if the window is already tracked
     /// (use <see cref="Toggle"/> for combined behavior, or <see cref="Restore"/> to undo).
@@ -86,6 +89,7 @@ internal sealed class FullScreenManager
     /// </summary>
     public void MaximizeToDesktop(IntPtr hwnd)
     {
+        using var autoPinSuspension = _autoPin.Suspend("MVD");
         if (!NativeMethods.IsWindow(hwnd))
         {
             Trace.WriteLine($"FullScreenManager: hwnd {hwnd} is not valid, aborting maximize.");
@@ -103,7 +107,7 @@ internal sealed class FullScreenManager
         var originalDesktopId = _vds.GetDesktopIdForWindow(hwnd);
         if (originalDesktopId == null)
         {
-            Trace.WriteLine("FullScreenManager: Could not determine original desktop, aborting.");
+            Trace.WriteLine($"FullScreenManager: Could not determine original desktop for hwnd {hwnd}, aborting.");
             return;
         }
 
@@ -137,8 +141,9 @@ internal sealed class FullScreenManager
 
         // 4. Maximize & switch
         bool elevated = NativeMethods.IsWindowElevated(hwnd);
+        bool isUwp = WindowStateHelper.IsUwpWindow(hwnd);
 
-        if (!elevated && NativeMethods.IsWindow(hwnd))
+        if (!elevated && !isUwp && NativeMethods.IsWindow(hwnd))
         {
             NativeMethods.ShowWindow(hwnd, NativeMethods.SW_MAXIMIZE);
             var waitUntil = Environment.TickCount + 300;
@@ -149,42 +154,86 @@ internal sealed class FullScreenManager
             }
         }
 
-        // Temporarily unpin all auto-pinned windows so the foreground app isn't
-        // dragged onto the new desktop when we switch.
-        AutoPin?.SuspendAll();
-
-        _vds.PinWindow(hwnd);
-
-        if (!_vds.SwitchToDesktop(tempDesktop))
+        if (isUwp)
         {
+            // UWP: do the absolute minimum — move + switch only. Native virtual
+            // desktops render UWP fullscreen fine during switch animations; every
+            // extra call we add (ShowWindow, Pin, focus stealing) breaks that.
+            // The user just clicked maximize, so the window is already fullscreen
+            // and focused; let the system handle activation and rendering.
+            // Unpin first: older builds left UWP windows pinned (which makes them
+            // appear on every desktop), and this cleans any leftover state.
             _vds.UnpinWindow(hwnd);
-            AutoPin?.ResumeAll();
-            RollbackSwitch(tempDesktop, originalDesktopId.Value, hwnd, originalPlacement, elevated);
-            return;
+
+            if (!_vds.MoveWindowToDesktop(hwnd, tempDesktop))
+            {
+                RollbackSwitch(tempDesktop, originalDesktopId.Value, hwnd, originalPlacement, elevated);
+                return;
+            }
+
+            if (!_vds.SwitchToDesktop(tempDesktop))
+            {
+                RollbackSwitch(tempDesktop, originalDesktopId.Value, hwnd, originalPlacement, elevated);
+                return;
+            }
+        }
+        else
+        {
+            _vds.PinWindow(hwnd);
+
+            if (!_vds.SwitchToDesktop(tempDesktop))
+            {
+                _vds.UnpinWindow(hwnd);
+                RollbackSwitch(tempDesktop, originalDesktopId.Value, hwnd, originalPlacement, elevated);
+                return;
+            }
+
+            if (!_vds.MoveWindowToDesktop(hwnd, tempDesktop))
+            {
+                _vds.UnpinWindow(hwnd);
+                RollbackSwitch(tempDesktop, originalDesktopId.Value, hwnd, originalPlacement, elevated);
+                return;
+            }
+
+            _vds.UnpinWindow(hwnd);
         }
 
-        if (!_vds.MoveWindowToDesktop(hwnd, tempDesktop))
-        {
-            _vds.UnpinWindow(hwnd);
-            AutoPin?.ResumeAll();
-            RollbackSwitch(tempDesktop, originalDesktopId.Value, hwnd, originalPlacement, elevated);
-            return;
-        }
-
-        _vds.UnpinWindow(hwnd);
-
-        AutoPin?.ResumeAll();
-
-        ScheduleFocusRetry(hwnd, 4);
+        // Focus retry is for regular windows. UWP manages its own activation;
+        // forcing foreground on ApplicationFrameWindow can leave it half-activated
+        // (which is suspected to break DWM rendering during switch animations).
+        if (!isUwp)
+            ScheduleFocusRetry(hwnd, 4);
 
         // 5. Track
         _tracker.Track(hwnd, originalDesktopId.Value, tempDesktopId.Value, tempDesktop, processName, originalPlacement);
+        _autoPin.ExcludeTrackedFullscreenWindow(hwnd);
 
         if (_settings.ShowSwitchPopup)
         {
             NotificationOverlay.ShowNotification("→ Virtual Desktop", processName ?? "", hwnd);
         }
-        Trace.WriteLine($"FullScreenManager: Successfully moved window to desktop {tempDesktopId}");
+        // Diagnostic: dump the window state right after MVD so we can see what
+        // DrawboardPDF-style windows actually look like on the temp desktop.
+        var dbgPlacement = NativeMethods.WINDOWPLACEMENT.Default;
+        bool dbgGot = NativeMethods.GetWindowPlacement(hwnd, ref dbgPlacement);
+        NativeMethods.GetWindowRect(hwnd, out var dbgRect);
+        var dbgScreen = Screen.FromHandle(hwnd).Bounds;
+        Trace.WriteLine($"FullScreenManager: Successfully moved window to desktop {tempDesktopId} " +
+            $"hwnd={hwnd} cls={GetClassNameSafe(hwnd)} " +
+            $"showCmd={(dbgGot ? dbgPlacement.showCmd.ToString() : "?")} " +
+            $"rect=({dbgRect.Left},{dbgRect.Top})-({dbgRect.Right},{dbgRect.Bottom})={dbgRect.Right - dbgRect.Left}x{dbgRect.Bottom - dbgRect.Top} " +
+            $"screen={dbgScreen.Width}x{dbgScreen.Height} fgIsHwnd={(NativeMethods.GetForegroundWindow() == hwnd)}");
+    }
+
+    private static string GetClassNameSafe(IntPtr hwnd)
+    {
+        try
+        {
+            var sb = new System.Text.StringBuilder(256);
+            NativeMethods.GetClassName(hwnd, sb, sb.Capacity);
+            return sb.ToString();
+        }
+        catch { return "?"; }
     }
 
     /// <summary>
@@ -256,6 +305,7 @@ internal sealed class FullScreenManager
     /// </summary>
     public void Restore(IntPtr hwnd, bool keepMinimized = false)
     {
+        using var autoPinSuspension = _autoPin.Suspend("Restore");
         var entry = _tracker.Get(hwnd);
         if (entry == null)
         {
@@ -270,13 +320,24 @@ internal sealed class FullScreenManager
         var origDesktop = _vds.FindDesktop(entry.OriginalDesktopId);
         try
         {
-            _vds.PinWindow(hwnd);
+            if (WindowStateHelper.IsUwpWindow(hwnd))
+            {
+                // UWP: no Pin/Unpin (see MaximizeToDesktop). Move then switch.
+                // Unpin first to clean any leftover pinned state from older builds.
+                _vds.UnpinWindow(hwnd);
+                if (origDesktop != null) _vds.MoveWindowToDesktop(hwnd, origDesktop);
+                if (origDesktop != null) _vds.SwitchToDesktop(origDesktop);
+            }
+            else
+            {
+                _vds.PinWindow(hwnd);
 
-            if (origDesktop != null) _vds.SwitchToDesktop(origDesktop);
-            if (origDesktop != null && NativeMethods.IsWindow(hwnd))
-                _vds.MoveWindowToDesktop(hwnd, origDesktop);
+                if (origDesktop != null) _vds.SwitchToDesktop(origDesktop);
+                if (origDesktop != null && NativeMethods.IsWindow(hwnd))
+                    _vds.MoveWindowToDesktop(hwnd, origDesktop);
 
-            _vds.UnpinWindow(hwnd);
+                _vds.UnpinWindow(hwnd);
+            }
 
             if (!keepMinimized && NativeMethods.IsWindow(hwnd))
             {
@@ -304,8 +365,9 @@ internal sealed class FullScreenManager
       
         _tracker.Untrack(hwnd);
 
-        // Set focus on the restored window (skip if minimized)
-        if (!keepMinimized && NativeMethods.IsWindow(hwnd))
+        // Set focus on the restored window (skip if minimized). UWP manages its
+        // own activation — don't force it (see MaximizeToDesktop).
+        if (!keepMinimized && NativeMethods.IsWindow(hwnd) && !WindowStateHelper.IsUwpWindow(hwnd))
         {
             NativeMethods.SetForegroundWindow(hwnd);
             ScheduleFocusRetry(hwnd, 2);
@@ -394,6 +456,12 @@ internal sealed class FullScreenManager
         {
             // Closed windows are handled by CleanupStaleEntries.
             if (!NativeMethods.IsWindow(entry.Hwnd)) continue;
+
+            // UWP windows report unreliable desktop-id values (probe-verified:
+            // GetWindowDesktopId can even throw TYPE_E_ELEMENTNOTFOUND), so this
+            // cleanup mis-deletes their temp desktop and flings the window to a
+            // fallback desktop. Their cleanup is handled by OnHide/OnLocationChange.
+            if (WindowStateHelper.IsUwpWindow(entry.Hwnd)) continue;
 
             var currentDesktopId = _vds.GetDesktopIdForWindow(entry.Hwnd);
             if (currentDesktopId == null || currentDesktopId.Value == entry.TempDesktopId) continue;

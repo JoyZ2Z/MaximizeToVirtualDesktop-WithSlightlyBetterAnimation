@@ -59,9 +59,56 @@ internal static partial class NativeMethods
     internal static extern bool IsWindowVisible(IntPtr hWnd);
 
     [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool IsWindowArranged(IntPtr hWnd);
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmGetWindowAttribute(
+        IntPtr hwnd, int dwAttribute, out int pvAttribute, int cbAttribute);
+
+    [DllImport("dwmapi.dll", EntryPoint = "DwmGetWindowAttribute")]
+    private static extern int DwmGetWindowRectAttribute(
+        IntPtr hwnd, int dwAttribute, out RECT pvAttribute, int cbAttribute);
+
+    private const int DWMWA_CLOAKED = 14;
+    private const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
+    private const int DWMWA_TRANSITIONS_FORCEDISABLED = 3;
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(
+        IntPtr hwnd, int dwAttribute, ref int pvAttribute, int cbAttribute);
+
+    [DllImport("dwmapi.dll")]
+    internal static extern int DwmFlush();
+
+    internal static bool IsWindowCloaked(IntPtr hwnd) =>
+        DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, out var cloaked, sizeof(int)) == 0 && cloaked != 0;
+
+    internal static bool TryGetVisibleFrameBounds(IntPtr hwnd, out RECT rect)
+    {
+        if (DwmGetWindowRectAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, out rect,
+                Marshal.SizeOf<RECT>()) == 0)
+            return true;
+        return GetWindowRect(hwnd, out rect);
+    }
+
+    internal static bool SetWindowTransitionsDisabled(IntPtr hwnd, bool disabled)
+    {
+        var value = disabled ? 1 : 0;
+        return DwmSetWindowAttribute(
+            hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, ref value, sizeof(int)) >= 0;
+    }
+
+    [DllImport("user32.dll")]
     internal static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
 
     internal const uint GW_OWNER = 4;
+
+    [DllImport("user32.dll")]
+    internal static extern IntPtr GetAncestor(IntPtr hWnd, uint gaFlags);
+
+    internal const uint GA_ROOT = 2;
+    internal const uint GA_ROOTOWNER = 3;
 
     [DllImport("user32.dll")]
     internal static extern int GetWindowTextLength(IntPtr hWnd);
@@ -73,14 +120,18 @@ internal static partial class NativeMethods
     internal static extern short GetAsyncKeyState(int vKey);
 
     [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    internal static extern bool IsIconic(IntPtr hWnd);
-
-    [DllImport("user32.dll")]
     internal static extern uint GetDoubleClickTime();
 
     [DllImport("user32.dll")]
     internal static extern int GetSystemMetrics(int nIndex);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool IsIconic(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
 
     [DllImport("user32.dll")]
     internal static extern IntPtr SetFocus(IntPtr hWnd);
@@ -198,29 +249,40 @@ internal static partial class NativeMethods
     // --- Constants ---
 
     internal const int SW_MAXIMIZE = 3;
-    internal const int SW_RESTORE = 9;
     internal const int SW_MINIMIZE = 6;
     internal const int SW_SHOWNOACTIVATE = 4;
 
     internal const uint WM_HOTKEY = 0x0312;
     internal const uint WM_NCHITTEST = 0x0084;
     internal const int WM_LBUTTONDOWN = 0x0201;
+    internal const int WM_KEYDOWN = 0x0100;
+    internal const int WM_SYSKEYDOWN = 0x0104;
     internal const uint WM_SYSCOMMAND = 0x0112;
 
     internal static readonly IntPtr SC_MAXIMIZE = new IntPtr(0xF030);
 
     internal const int HTMAXBUTTON = 9;
     internal const int HTCAPTION = 2;
-    internal const int HTSYSMENU = 3;
-    internal const int HTMENU = 5;
-
     internal const int SM_CXDOUBLECLK = 36;
     internal const int SM_CYDOUBLECLK = 37;
 
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter,
+        int X, int Y, int cx, int cy, uint uFlags);
+
+    internal static readonly IntPtr HWND_BOTTOM = new IntPtr(1);
+    internal const uint SWP_NOSIZE = 0x0001;
+    internal const uint SWP_NOMOVE = 0x0002;
+    internal const uint SWP_NOACTIVATE = 0x0010;
+
     internal const int WH_MOUSE_LL = 14;
+    internal const int WH_KEYBOARD_LL = 13;
     internal const int HC_ACTION = 0;
 
     internal const int VK_SHIFT = 0x10;
+    internal const uint VK_TAB = 0x09;
+    internal const uint LLKHF_ALTDOWN = 0x20;
 
     internal const uint MOD_CONTROL = 0x0002;
     internal const uint MOD_ALT = 0x0001;
@@ -233,6 +295,10 @@ internal static partial class NativeMethods
     internal const uint VK_A = 0x41;
 
     internal const uint WINEVENT_OUTOFCONTEXT = 0x0000;
+    internal const uint EVENT_SYSTEM_FOREGROUND = 0x0003;
+    internal const uint EVENT_SYSTEM_DESKTOPSWITCH = 0x001B;
+    internal const uint EVENT_OBJECT_CREATE = 0x8000;
+    internal const uint EVENT_OBJECT_SHOW = 0x8002;
     internal const uint EVENT_OBJECT_DESTROY = 0x8001;
     internal const uint EVENT_OBJECT_HIDE = 0x8003;
     internal const uint EVENT_SYSTEM_MOVESIZEEND = 0x000B;
@@ -253,6 +319,16 @@ internal static partial class NativeMethods
     {
         public POINT pt;
         public uint mouseData;
+        public uint flags;
+        public uint time;
+        public IntPtr dwExtraInfo;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct KBDLLHOOKSTRUCT
+    {
+        public uint vkCode;
+        public uint scanCode;
         public uint flags;
         public uint time;
         public IntPtr dwExtraInfo;

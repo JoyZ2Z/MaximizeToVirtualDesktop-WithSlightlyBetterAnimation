@@ -18,5 +18,10 @@ packages/
 
 ## Publish output
 publish/
+release/
+document/
+test/
+docs/
+tests/
 
 mvd-debug.log

@@ -52,6 +52,39 @@ internal sealed class AppSettings
     /// <summary>When true, continuously pin non-fullscreen windows to all desktops.</summary>
     public bool AutoPinEnabled { get; set; } = false;
 
+    /// <summary>Selected AutoPin mode. Null means this is a legacy settings file.</summary>
+    public AutoPinMode? AutoPinMode { get; set; }
+
+    /// <summary>Mode restored by the AutoPin hotkey when AutoPin is off.</summary>
+    public AutoPinMode LastEnabledAutoPinMode { get; set; } =
+        MaximizeToVirtualDesktop.AutoPinMode.TrackWindows;
+
+    public AutoPinMode ResolveAutoPinMode() =>
+        AutoPinModePolicy.Resolve(AutoPinMode, AutoPinEnabled);
+
+    public void SetAutoPinMode(AutoPinMode mode)
+    {
+        AutoPinMode = mode;
+        AutoPinEnabled = mode != MaximizeToVirtualDesktop.AutoPinMode.Off;
+        if (mode != MaximizeToVirtualDesktop.AutoPinMode.Off)
+            LastEnabledAutoPinMode = mode;
+    }
+
+    /// <summary>
+    /// When true, reorder virtual desktops by recent use after each switch
+    /// (main desktop stays first). When false, desktop order is left untouched.
+    /// </summary>
+    public bool AutoSortEnabled { get; set; } = false;
+
+    /// <summary>Stable identity of Desktop 1, which Auto-Sort always keeps leftmost.</summary>
+    public Guid? MainDesktopId { get; set; }
+
+    /// <summary>
+    /// How long (in seconds) a desktop must be visited before it counts as "recently used"
+    /// for MRU ordering. Visits shorter than this are treated as passing through.
+    /// </summary>
+    public int MruThresholdSeconds { get; set; } = 5;
+
     /// <summary>
     /// When true, any click on the maximize button sends the window to a virtual desktop.
     /// Shift+Click performs a normal maximize instead.

@@ -36,13 +36,25 @@ internal sealed class FullScreenTracker
         IVirtualDesktop tempDesktop, string? processName,
         NativeMethods.WINDOWPLACEMENT originalPlacement)
     {
+        Track(new TrackingEntry(hwnd, originalDesktopId, tempDesktopId,
+            tempDesktop, processName, originalPlacement));
+    }
+
+    public void Track(TrackingEntry entry)
+    {
         lock (_lock)
         {
-            _entries[hwnd] = new TrackingEntry(hwnd, originalDesktopId, tempDesktopId,
-                tempDesktop, processName, originalPlacement);
-            Trace.WriteLine($"FullScreenTracker: Now tracking {hwnd} (total: {_entries.Count})");
+            _entries[entry.Hwnd] = entry;
+            Trace.WriteLine(
+                $"FullScreenTracker: Now tracking {entry.Hwnd} (total: {_entries.Count})");
         }
         PersistToDisk();
+    }
+
+    public TrackingEntry? GetByDesktop(Guid desktopId)
+    {
+        lock (_lock) return _entries.Values.FirstOrDefault(
+            entry => entry.TempDesktopId == desktopId);
     }
 
     public TrackingEntry? Untrack(IntPtr hwnd)

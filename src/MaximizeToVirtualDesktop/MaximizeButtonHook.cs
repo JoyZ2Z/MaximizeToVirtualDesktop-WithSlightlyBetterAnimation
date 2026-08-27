@@ -13,22 +13,12 @@ internal sealed class MaximizeButtonHook : IDisposable
     private readonly FullScreenManager _manager;
     private readonly Control _syncControl;
     private readonly AppSettings _settings;
+    private readonly TitleBarDoubleClickTracker _doubleClickTracker = new();
     private IntPtr _hookHandle;
     private bool _disposed;
 
     // Must be stored as a field to prevent GC collection
     private readonly NativeMethods.LowLevelHookProc _hookProc;
-
-    // Double-click tracking
-    private long _lastClickTicks;
-    private int _lastClickX;
-    private int _lastClickY;
-    private IntPtr _lastClickHwnd;
-
-    // System metrics (cached)
-    private static readonly int DoubleClickTimeMs = (int)NativeMethods.GetDoubleClickTime();
-    private static readonly int DoubleClickWidth = NativeMethods.GetSystemMetrics(NativeMethods.SM_CXDOUBLECLK);
-    private static readonly int DoubleClickHeight = NativeMethods.GetSystemMetrics(NativeMethods.SM_CYDOUBLECLK);
 
     public MaximizeButtonHook(FullScreenManager manager, Control syncControl, AppSettings settings)
     {
@@ -62,48 +52,34 @@ internal sealed class MaximizeButtonHook : IDisposable
     {
         if (nCode >= NativeMethods.HC_ACTION && wParam == (IntPtr)NativeMethods.WM_LBUTTONDOWN)
         {
-            if (!IsTriggerActive()) return NativeMethods.CallNextHookEx(_hookHandle, nCode, wParam, lParam);
-
             var hookStruct = Marshal.PtrToStructure<NativeMethods.MSLLHOOKSTRUCT>(lParam);
             var hwnd = NativeMethods.WindowFromPoint(hookStruct.pt);
+            var topLevel = hwnd == IntPtr.Zero ? IntPtr.Zero : GetTopLevelWindow(hwnd);
 
-            if (hwnd != IntPtr.Zero)
+            if (topLevel != IntPtr.Zero
+                && IsTriggerActive()
+                && IsHitTest(topLevel, hookStruct.pt, NativeMethods.HTMAXBUTTON))
             {
-                if (IsClickOnMaximizeButton(hwnd, hookStruct.pt))
-                {
-                    var buttonTopLevel = GetTopLevelWindow(hwnd);
-                    if (buttonTopLevel != IntPtr.Zero)
-                    {
-                        PostToggle(buttonTopLevel);
-                        return (IntPtr)1;
-                    }
-                }
+                _doubleClickTracker.Reset();
+                PostToggle(topLevel);
+                return (IntPtr)1;
+            }
 
-                // Title-bar double-click
-                var nowTicks = DateTime.UtcNow.Ticks;
-                var elapsedMs = (nowTicks - _lastClickTicks) / TimeSpan.TicksPerMillisecond;
-                var topLevel = GetTopLevelWindow(hwnd);
-                var lastTopLevel = _lastClickHwnd != IntPtr.Zero
-                    ? GetTopLevelWindow(_lastClickHwnd) : IntPtr.Zero;
-
-                if (elapsedMs > 0 && elapsedMs < DoubleClickTimeMs &&
-                    Math.Abs(hookStruct.pt.X - _lastClickX) < DoubleClickWidth &&
-                    Math.Abs(hookStruct.pt.Y - _lastClickY) < DoubleClickHeight &&
-                    topLevel != IntPtr.Zero && topLevel == lastTopLevel)
+            if (topLevel != IntPtr.Zero
+                && IsHitTest(topLevel, hookStruct.pt, NativeMethods.HTCAPTION)
+                && _doubleClickTracker.Observe(
+                    topLevel,
+                    hookStruct.pt.X,
+                    hookStruct.pt.Y,
+                    hookStruct.time,
+                    NativeMethods.GetDoubleClickTime(),
+                    NativeMethods.GetSystemMetrics(NativeMethods.SM_CXDOUBLECLK),
+                    NativeMethods.GetSystemMetrics(NativeMethods.SM_CYDOUBLECLK)))
+            {
+                if (_manager.IsTracked(topLevel) || IsTriggerActive())
                 {
-                    if (IsClickOnCaption(hwnd, hookStruct.pt))
-                    {
-                        _lastClickTicks = 0;
-                        PostToggle(topLevel);
-                        return (IntPtr)1;
-                    }
-                }
-                else
-                {
-                    _lastClickTicks = nowTicks;
-                    _lastClickX = hookStruct.pt.X;
-                    _lastClickY = hookStruct.pt.Y;
-                    _lastClickHwnd = hwnd;
+                    PostToggle(topLevel);
+                    return (IntPtr)1;
                 }
             }
         }
@@ -132,7 +108,7 @@ internal sealed class MaximizeButtonHook : IDisposable
         }
     }
 
-    private static bool IsClickOnMaximizeButton(IntPtr hwnd, NativeMethods.POINT pt)
+    private static bool IsHitTest(IntPtr hwnd, NativeMethods.POINT pt, int expectedHit)
     {
         try
         {
@@ -140,25 +116,7 @@ internal sealed class MaximizeButtonHook : IDisposable
             IntPtr result = NativeMethods.SendMessageTimeout(
                 hwnd, NativeMethods.WM_NCHITTEST, IntPtr.Zero, lParam,
                 NativeMethods.SMTO_ABORTIFHUNG, 100, out IntPtr hitResult);
-            return result != IntPtr.Zero && hitResult == (IntPtr)NativeMethods.HTMAXBUTTON;
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
-    private static bool IsClickOnCaption(IntPtr hwnd, NativeMethods.POINT pt)
-    {
-        try
-        {
-            IntPtr lParam = (IntPtr)((pt.Y << 16) | (pt.X & 0xFFFF));
-            IntPtr result = NativeMethods.SendMessageTimeout(
-                hwnd, NativeMethods.WM_NCHITTEST, IntPtr.Zero, lParam,
-                NativeMethods.SMTO_ABORTIFHUNG, 50, out IntPtr hitResult);
-            if (result == IntPtr.Zero) return false;
-            var hit = hitResult.ToInt32();
-            return hit == NativeMethods.HTCAPTION || hit == NativeMethods.HTSYSMENU || hit == NativeMethods.HTMENU;
+            return result != IntPtr.Zero && hitResult == (IntPtr)expectedHit;
         }
         catch
         {

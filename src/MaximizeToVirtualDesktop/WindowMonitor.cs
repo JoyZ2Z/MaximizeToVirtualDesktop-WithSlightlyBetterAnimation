@@ -12,7 +12,9 @@ namespace MaximizeToVirtualDesktop;
 internal sealed class WindowMonitor : IDisposable
 {
     private readonly FullScreenManager _manager;
+    private readonly SnapWorkspaceService _snapWorkspaceService;
     private readonly FullScreenTracker _tracker;
+    private readonly VirtualDesktopService _vds;
     private readonly Control _syncControl;
     private readonly AppSettings _settings;
     private IntPtr _locationChangeHook;
@@ -28,11 +30,16 @@ internal sealed class WindowMonitor : IDisposable
     private IntPtr _moveSizeEndHook;
     // Track windows that have been maximized but need to wait for resize end
     private readonly HashSet<IntPtr> _pendingMaximize = new();
+    private readonly HashSet<IntPtr> _pendingFullscreenExit = new();
 
-    public WindowMonitor(FullScreenManager manager, FullScreenTracker tracker, Control syncControl, AppSettings settings)
+    public WindowMonitor(FullScreenManager manager, FullScreenTracker tracker,
+        SnapWorkspaceService snapWorkspaceService, VirtualDesktopService vds,
+        Control syncControl, AppSettings settings)
     {
         _manager = manager;
         _tracker = tracker;
+        _snapWorkspaceService = snapWorkspaceService;
+        _vds = vds;
         _syncControl = syncControl;
         _settings = settings;
 
@@ -96,26 +103,29 @@ internal sealed class WindowMonitor : IDisposable
         // Only care about top-level window changes (OBJID_WINDOW)
         if (idObject != NativeMethods.OBJID_WINDOW || idChild != 0) return;
 
-        // If the window is already tracked, check if it is being restored (i.e., no longer maximized)
+        // If the window is already tracked, check if it is being restored (i.e., no longer fullscreen).
         if (_tracker.IsTracked(hwnd))
         {
-            var placement = NativeMethods.WINDOWPLACEMENT.Default;
-            if (NativeMethods.GetWindowPlacement(hwnd, ref placement))
+            if (!WindowStateHelper.IsStillFullscreen(hwnd))
             {
-                if (placement.showCmd != NativeMethods.SW_MAXIMIZE)
-                {
-                    // If left mouse button is down, user is dragging — let Windows handle the resize.
-                    // OnMoveSizeEnd will fire after release and trigger restore.
-                    bool isDragging = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_LBUTTON) & 0x8000) != 0;
-                    if (isDragging) return;
-
-                    bool isMinimized = NativeMethods.IsIconic(hwnd);
-                    Trace.WriteLine($"WindowMonitor: Tracked window {hwnd} un-maximized (minimized={isMinimized}).");
-                    MarshalToUiThread(() => _manager.Restore(hwnd, keepMinimized: isMinimized));
+                // A virtual-desktop switch can transiently report a tracked
+                // window as restored. This is not UWP-specific: never start
+                // fullscreen-exit arbitration unless the window is actually
+                // on the active desktop.
+                if (!_vds.IsWindowOnCurrentDesktop(hwnd))
                     return;
-                }
+
+                // If left mouse button is down, user is dragging — let Windows handle the resize.
+                // OnMoveSizeEnd will fire after release and trigger restore.
+                bool isDragging = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_LBUTTON) & 0x8000) != 0;
+                if (isDragging) return;
+
+                Trace.WriteLine(
+                    $"WindowMonitor: Tracked window {hwnd} left fullscreen; arbitration queued.");
+                MarshalToUiThread(() => QueueFullscreenExitArbitration(hwnd));
+                return;
             }
-            // Still maximized; let MoveSizeEnd handle pending maximize.
+            // Still fullscreen; let MoveSizeEnd handle pending maximize.
             return;
         }
 
@@ -169,7 +179,7 @@ internal sealed class WindowMonitor : IDisposable
         }
     }
 
-    private async void OnMoveSizeEnd(IntPtr hWinEventHook, uint eventType, IntPtr hwnd,
+    private void OnMoveSizeEnd(IntPtr hWinEventHook, uint eventType, IntPtr hwnd,
         int idObject, int idChild, uint idEventThread, uint dwmsEventTime)
     {
         // Only care about top-level window changes (OBJID_WINDOW)
@@ -188,16 +198,70 @@ internal sealed class WindowMonitor : IDisposable
             return;
         }
 
-        // Handle only tracked windows that are being restored (not maximized)
+        // Handle only tracked windows that are being restored (not fullscreen)
         if (!_tracker.IsTracked(hwnd)) return;
-        var placement = NativeMethods.WINDOWPLACEMENT.Default;
-        if (!NativeMethods.GetWindowPlacement(hwnd, ref placement)) return;
-        Trace.WriteLine($"WindowMonitor: MoveSizeEnd: tracked window {hwnd} showCmd={placement.showCmd}.");
-        if (placement.showCmd != NativeMethods.SW_MAXIMIZE && !NativeMethods.IsIconic(hwnd))
+        Trace.WriteLine($"WindowMonitor: MoveSizeEnd for tracked window {hwnd}.");
+        if (!_vds.IsWindowOnCurrentDesktop(hwnd)) return;
+        if (!WindowStateHelper.IsStillFullscreen(hwnd) && !NativeMethods.IsIconic(hwnd))
         {
-            Trace.WriteLine($"WindowMonitor: Tracked window {hwnd} un-maximized via move/size, restoring.");
-            await Task.Delay(100);
-            MarshalToUiThread(() => _manager.Restore(hwnd));
+            Trace.WriteLine(
+                $"WindowMonitor: Tracked window {hwnd} left fullscreen via move/size; arbitration queued.");
+            MarshalToUiThread(() => QueueFullscreenExitArbitration(hwnd));
+        }
+    }
+
+    private void QueueFullscreenExitArbitration(IntPtr hwnd)
+    {
+        if (_disposed || !_tracker.IsTracked(hwnd)
+            || !_pendingFullscreenExit.Add(hwnd))
+        {
+            return;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(FullscreenExitPolicy.ArbitrationDelay);
+            MarshalToUiThread(() => ReconcileFullscreenExit(hwnd));
+        });
+    }
+
+    private void ReconcileFullscreenExit(IntPtr hwnd)
+    {
+        _pendingFullscreenExit.Remove(hwnd);
+        if (_disposed || !_tracker.IsTracked(hwnd)
+            || _manager.IsMutationInFlight(hwnd)
+            || !NativeMethods.IsWindow(hwnd))
+        {
+            return;
+        }
+        if (!_vds.IsWindowOnCurrentDesktop(hwnd))
+        {
+            return;
+        }
+
+        var decision = FullscreenExitPolicy.DecideAfterDelay(
+            WindowStateHelper.IsStillFullscreen(hwnd),
+            NativeMethods.IsIconic(hwnd),
+            SnapWorkspaceService.IsWindowArranged(hwnd));
+        switch (decision)
+        {
+            case FullscreenExitDecision.None:
+                return;
+            case FullscreenExitDecision.RestoreMinimized:
+                _manager.Restore(hwnd, keepMinimized: true);
+                return;
+            case FullscreenExitDecision.Restore:
+                _manager.Restore(hwnd);
+                return;
+            case FullscreenExitDecision.PromoteToSnap:
+                if (!_snapWorkspaceService.TryPromoteFullscreenWindow(hwnd))
+                {
+                    Trace.WriteLine(
+                        $"WindowMonitor: arranged fullscreen window {hwnd} retained; "
+                        + "Snap promotion will retry.");
+                    QueueFullscreenExitArbitration(hwnd);
+                }
+                return;
         }
     }
 
@@ -219,7 +283,9 @@ internal sealed class WindowMonitor : IDisposable
 
         // A desktop switch also fires EVENT_OBJECT_HIDE for windows on other desktops,
         // so a hide alone doesn't mean the window was closed. Verify the handle is
-        // actually gone shortly after before cleaning up.
+        // actually gone shortly after before cleaning up. (Windows that are alive but
+        // invisible — tray apps, exclusive-fullscreen on another desktop — are left
+        // alone: IsWindowVisible cannot reliably distinguish them.)
         Trace.WriteLine($"WindowMonitor: Tracked window {hwnd} hidden, verifying if closed.");
         _ = Task.Run(async () =>
         {
@@ -274,6 +340,8 @@ internal sealed class WindowMonitor : IDisposable
             NativeMethods.UnhookWinEvent(_moveSizeEndHook);
             _moveSizeEndHook = IntPtr.Zero;
         }
+
+        _pendingFullscreenExit.Clear();
 
         Trace.WriteLine("WindowMonitor: Disposed.");
     }

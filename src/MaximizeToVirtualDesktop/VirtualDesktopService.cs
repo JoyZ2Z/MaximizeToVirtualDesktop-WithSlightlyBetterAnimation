@@ -110,6 +110,24 @@ internal sealed class VirtualDesktopService : IDisposable
     }
 
     /// <summary>
+    /// True if the window is on the currently visible virtual desktop.
+    /// UWP windows report unreliable showCmd/desktop-id values when they are on
+    /// a non-current desktop, so this is used to gate state checks for them.
+    /// </summary>
+    public bool IsWindowOnCurrentDesktop(IntPtr hwnd)
+    {
+        try
+        {
+            return _manager?.IsWindowOnCurrentVirtualDesktop(hwnd) ?? false;
+        }
+        catch (Exception ex)
+        {
+            Trace.WriteLine($"VirtualDesktopService: IsWindowOnCurrentDesktop failed: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Creates a new virtual desktop. Returns its ID, or null on failure.
     /// </summary>
     public (IVirtualDesktop? desktop, Guid? id) CreateDesktop()
@@ -294,26 +312,449 @@ internal sealed class VirtualDesktopService : IDisposable
     }
 
     /// <summary>
+    /// Returns the IDs of all virtual desktops in physical (left-to-right) order.
+    /// </summary>
+    public List<Guid> GetAllDesktopIds()
+    {
+        var result = new List<Guid>();
+        IObjectArray? desktops = null;
+        try
+        {
+            _managerInternal!.GetDesktops(out desktops);
+            desktops.GetCount(out int count);
+            var iid = typeof(IVirtualDesktop).GUID;
+            for (int i = 0; i < count; i++)
+            {
+                desktops.GetAt(i, ref iid, out object obj);
+                result.Add(((IVirtualDesktop)obj).GetId());
+                Marshal.ReleaseComObject(obj);
+            }
+        }
+        catch (Exception ex)
+        {
+            Trace.WriteLine($"VirtualDesktopService: GetAllDesktopIds failed: {ex.Message}");
+        }
+        finally
+        {
+            if (desktops != null) Marshal.ReleaseComObject(desktops);
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Moves a virtual desktop to the given physical index (0 = leftmost).
+    /// </summary>
+    public bool MoveDesktopToIndex(Guid desktopId, int index)
+    {
+        IVirtualDesktop? desktop = null;
+        try
+        {
+            desktop = FindDesktop(desktopId);
+            if (desktop == null) return false;
+            _managerInternal!.MoveDesktop(desktop, index);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Trace.WriteLine($"VirtualDesktopService: MoveDesktopToIndex failed for {desktopId} -> {index}: {ex.Message}");
+            return false;
+        }
+        finally
+        {
+            if (desktop != null) Marshal.ReleaseComObject(desktop);
+        }
+    }
+
+    /// <summary>
     /// Returns true if the window's view is pinned to all virtual desktops.
     /// </summary>
     public bool IsWindowPinned(IntPtr hwnd)
     {
+        return TryGetWindowPinnedState(hwnd, out var isPinned) && isPinned;
+    }
+
+    /// <summary>Removes a desktop using an explicit fallback desktop.</summary>
+    public bool RemoveDesktop(IVirtualDesktop desktop, Guid fallbackDesktopId)
+    {
+        IVirtualDesktop? fallback = null;
+        try
+        {
+            fallback = FindDesktop(fallbackDesktopId);
+            if (fallback == null || fallback.GetId() == desktop.GetId()) return false;
+            _managerInternal!.RemoveDesktop(desktop, fallback);
+            Trace.WriteLine(
+                $"VirtualDesktopService: Removed desktop {desktop.GetId()} with fallback {fallbackDesktopId}");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Trace.WriteLine($"VirtualDesktopService: RemoveDesktop explicit fallback failed: {ex.Message}");
+            return false;
+        }
+        finally
+        {
+            if (fallback != null) Marshal.ReleaseComObject(fallback);
+        }
+    }
+
+    /// <summary>
+    /// Distinguishes a real unpinned state from a failed application-view query.
+    /// Callers that intend to mutate state must not treat query failure as false.
+    /// </summary>
+    public bool TryGetWindowPinnedState(IntPtr hwnd, out bool isPinned)
+    {
         IApplicationView? view = null;
+        isPinned = false;
         try
         {
             if (_pinnedApps == null || _viewCollection == null) return false;
             _viewCollection.GetViewForHwnd(hwnd, out view);
-            return view != null && _pinnedApps.IsViewPinned(view);
+            if (view == null) return false;
+            isPinned = _pinnedApps.IsViewPinned(view);
+            return true;
         }
         catch (Exception ex)
         {
-            Trace.WriteLine($"VirtualDesktopService: IsWindowPinned failed: {ex.Message}");
+            Trace.WriteLine($"VirtualDesktopService: TryGetWindowPinnedState failed: {ex.Message}");
             return false;
         }
         finally
         {
             if (view != null) Marshal.ReleaseComObject(view);
         }
+    }
+
+    /// <summary>
+    /// Reads the desktop identity and pin state from the same application view.
+    /// AutoPin uses this as an all-or-nothing capability check so a raw HWND with
+    /// no usable view can never enter its mutation policy.
+    /// </summary>
+    public bool TryGetAutoPinWindowState(
+        IntPtr hwnd,
+        out Guid desktopId,
+        out bool isPinned)
+    {
+        IApplicationView? view = null;
+        desktopId = Guid.Empty;
+        isPinned = false;
+        try
+        {
+            if (_pinnedApps == null || _viewCollection == null) return false;
+            _viewCollection.GetViewForHwnd(hwnd, out view);
+            if (view == null) return false;
+
+            var desktopResult = view.GetVirtualDesktopId(out desktopId);
+            if (desktopResult != 0 || desktopId == Guid.Empty) return false;
+            isPinned = _pinnedApps.IsViewPinned(view);
+            return true;
+        }
+        catch
+        {
+            // A foreground host/child HWND without an IApplicationView is normal.
+            // The resolver below tries same-family views before giving up.
+            return false;
+        }
+        finally
+        {
+            if (view != null) Marshal.ReleaseComObject(view);
+        }
+    }
+
+    /// <summary>
+    /// Resolves a Win32 foreground HWND to the HWND owned by its application view.
+    /// Foreground notifications can report a child or host window which has no
+    /// direct IApplicationView, while the view's thumbnail/root window does.
+    /// </summary>
+    public bool TryResolveForegroundAutoPinWindowState(
+        IntPtr foregroundHwnd,
+        bool allowSameProcessFallback,
+        out IntPtr viewHwnd,
+        out Guid desktopId,
+        out bool isPinned)
+    {
+        viewHwnd = IntPtr.Zero;
+        desktopId = Guid.Empty;
+        isPinned = false;
+
+        if (TryGetAutoPinWindowState(foregroundHwnd, out desktopId, out isPinned))
+        {
+            viewHwnd = foregroundHwnd;
+            return true;
+        }
+
+        IObjectArray? views = null;
+        var enumeratedAllViews = false;
+        try
+        {
+            if (_pinnedApps == null || _viewCollection == null) return false;
+            if (_viewCollection.GetViewsByZOrder(out views) != 0 || views == null) return false;
+
+            views.GetCount(out var count);
+            var viewGuid = typeof(IApplicationView).GUID;
+            for (var index = 0; index < count; index++)
+            {
+                IApplicationView? candidate = null;
+                try
+                {
+                    views.GetAt(index, ref viewGuid, out var unknown);
+                    candidate = unknown as IApplicationView;
+                    if (candidate == null) continue;
+                    if (candidate.GetThumbnailWindow(out var candidateHwnd) != 0
+                        || candidateHwnd == IntPtr.Zero
+                        || !IsSameWindowFamily(foregroundHwnd, candidateHwnd))
+                    {
+                        continue;
+                    }
+
+                    if (candidate.GetVirtualDesktopId(out desktopId) != 0
+                        || desktopId == Guid.Empty)
+                    {
+                        return false;
+                    }
+
+                    isPinned = _pinnedApps.IsViewPinned(candidate);
+                    viewHwnd = candidateHwnd;
+                    Trace.WriteLine($"VirtualDesktopService: resolved foreground {foregroundHwnd} to view {viewHwnd}.");
+                    return true;
+                }
+                finally
+                {
+                    if (candidate != null) Marshal.ReleaseComObject(candidate);
+                }
+            }
+            enumeratedAllViews = true;
+        }
+        catch (Exception ex)
+        {
+            Trace.WriteLine($"VirtualDesktopService: foreground view resolution failed for {foregroundHwnd}: {ex.Message}");
+        }
+        finally
+        {
+            if (views != null) Marshal.ReleaseComObject(views);
+        }
+
+        // GetViewsByZOrder already enumerates every application view.  If it
+        // completed without finding this HWND family, GetViewInFocus can only
+        // repeat the same negative lookup (and frequently throws while the
+        // shell transitions desktops).  Reserve that fallback for a failed
+        // collection enumeration, where it can still recover a valid view.
+        if (enumeratedAllViews) return false;
+
+        // Retry the focused view only as another way to retrieve the same Win32
+        // window family. GetViewInFocus may already have advanced to the fullscreen
+        // anchor, so an unrelated focused view must never stand in for this HWND.
+        IApplicationView? focusedView = null;
+        IntPtr focusedViewPointer = IntPtr.Zero;
+        try
+        {
+            if (_viewCollection == null || _pinnedApps == null) return false;
+            if (_viewCollection.GetViewInFocus(out focusedViewPointer) != 0
+                || focusedViewPointer == IntPtr.Zero)
+            {
+                return false;
+            }
+
+            focusedView = (IApplicationView)Marshal.GetObjectForIUnknown(focusedViewPointer);
+            NativeMethods.GetWindowThreadProcessId(foregroundHwnd, out var foregroundProcessId);
+            if (focusedView.GetThumbnailWindow(out var focusedHwnd) != 0
+                || focusedHwnd == IntPtr.Zero
+                || !TryGetWindowProcessId(focusedHwnd, out var focusedProcessId)
+                || !AutoPinFocusedViewFallbackPolicy.CanAccept(
+                    IsSameWindowFamily(foregroundHwnd, focusedHwnd),
+                    allowSameProcessFallback,
+                    foregroundProcessId != 0 && foregroundProcessId == focusedProcessId)
+                || focusedView.GetVirtualDesktopId(out desktopId) != 0
+                || desktopId == Guid.Empty)
+            {
+                return false;
+            }
+
+            isPinned = _pinnedApps.IsViewPinned(focusedView);
+            viewHwnd = focusedHwnd;
+            Trace.WriteLine($"VirtualDesktopService: resolved foreground {foregroundHwnd} through focused view {viewHwnd}.");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Trace.WriteLine($"VirtualDesktopService: focused-view resolution failed for {foregroundHwnd}: {ex.Message}");
+        }
+        finally
+        {
+            if (focusedView != null) Marshal.ReleaseComObject(focusedView);
+            if (focusedViewPointer != IntPtr.Zero) Marshal.Release(focusedViewPointer);
+        }
+
+        return false;
+    }
+
+    private static bool TryGetWindowProcessId(IntPtr hwnd, out int processId)
+    {
+        NativeMethods.GetWindowThreadProcessId(hwnd, out processId);
+        return processId != 0;
+    }
+
+    /// <summary>
+    /// Resolves a top-level Win32 window to the view that owns its pin state.
+    /// This is used by Z-order observation and deliberately does not read a
+    /// virtual-desktop ID: AutoPin has no ownership-desktop policy.
+    /// </summary>
+    public bool TryResolveAutoPinView(IntPtr hwnd, out IntPtr viewHwnd, out bool isPinned)
+    {
+        viewHwnd = IntPtr.Zero;
+        isPinned = false;
+        if (TryGetDirectAutoPinViewState(hwnd, out isPinned))
+        {
+            viewHwnd = hwnd;
+            return true;
+        }
+
+        IObjectArray? views = null;
+        try
+        {
+            if (_viewCollection == null || _pinnedApps == null) return false;
+            if (_viewCollection.GetViewsByZOrder(out views) != 0 || views == null) return false;
+            views.GetCount(out var count);
+            var viewGuid = typeof(IApplicationView).GUID;
+            for (var index = 0; index < count; index++)
+            {
+                IApplicationView? candidate = null;
+                try
+                {
+                    views.GetAt(index, ref viewGuid, out var unknown);
+                    candidate = unknown as IApplicationView;
+                    if (candidate == null || candidate.GetThumbnailWindow(out var candidateHwnd) != 0
+                        || candidateHwnd == IntPtr.Zero || !IsSameWindowFamily(hwnd, candidateHwnd))
+                    {
+                        continue;
+                    }
+
+                    isPinned = _pinnedApps.IsViewPinned(candidate);
+                    viewHwnd = candidateHwnd;
+                    return true;
+                }
+                finally
+                {
+                    if (candidate != null) Marshal.ReleaseComObject(candidate);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Trace.WriteLine($"VirtualDesktopService: view resolution failed for {hwnd}: {ex.Message}");
+        }
+        finally
+        {
+            if (views != null) Marshal.ReleaseComObject(views);
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Resolves a group of top-level HWNDs using at most one application-view
+    /// enumeration for the whole group.  AutoPin uses this for its full-window
+    /// observation; calling the single-window fallback for every host window
+    /// made that path scale with windows times application views.
+    /// </summary>
+    public IReadOnlyDictionary<IntPtr, AutoPinViewState> ResolveAutoPinViews(
+        IEnumerable<IntPtr> hwnds)
+    {
+        var results = new Dictionary<IntPtr, AutoPinViewState>();
+        var unresolved = new HashSet<IntPtr>();
+        foreach (var hwnd in hwnds)
+        {
+            if (results.ContainsKey(hwnd) || !unresolved.Add(hwnd)) continue;
+            if (TryGetDirectAutoPinViewState(hwnd, out var isPinned))
+            {
+                results[hwnd] = new AutoPinViewState(hwnd, isPinned);
+                unresolved.Remove(hwnd);
+            }
+        }
+        if (unresolved.Count == 0) return results;
+
+        IObjectArray? views = null;
+        try
+        {
+            if (_viewCollection == null || _pinnedApps == null) return results;
+            if (_viewCollection.GetViewsByZOrder(out views) != 0 || views == null) return results;
+            views.GetCount(out var count);
+            var viewGuid = typeof(IApplicationView).GUID;
+            for (var index = 0; index < count && unresolved.Count > 0; index++)
+            {
+                IApplicationView? candidate = null;
+                try
+                {
+                    views.GetAt(index, ref viewGuid, out var unknown);
+                    candidate = unknown as IApplicationView;
+                    if (candidate == null
+                        || candidate.GetThumbnailWindow(out var candidateHwnd) != 0
+                        || candidateHwnd == IntPtr.Zero)
+                    {
+                        continue;
+                    }
+
+                    var matchingSources = unresolved
+                        .Where(source => IsSameWindowFamily(source, candidateHwnd))
+                        .ToArray();
+                    if (matchingSources.Length == 0) continue;
+
+                    var isPinned = _pinnedApps.IsViewPinned(candidate);
+                    foreach (var source in matchingSources)
+                    {
+                        results[source] = new AutoPinViewState(candidateHwnd, isPinned);
+                        unresolved.Remove(source);
+                    }
+                }
+                finally
+                {
+                    if (candidate != null) Marshal.ReleaseComObject(candidate);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Trace.WriteLine($"VirtualDesktopService: batch view resolution failed: {ex.Message}");
+        }
+        finally
+        {
+            if (views != null) Marshal.ReleaseComObject(views);
+        }
+
+        return results;
+    }
+
+    private bool TryGetDirectAutoPinViewState(IntPtr hwnd, out bool isPinned)
+    {
+        isPinned = false;
+        IApplicationView? directView = null;
+        try
+        {
+            if (_viewCollection == null || _pinnedApps == null) return false;
+            _viewCollection.GetViewForHwnd(hwnd, out directView);
+            if (directView != null)
+            {
+                isPinned = _pinnedApps.IsViewPinned(directView);
+                return true;
+            }
+        }
+        catch
+        {
+            // Host/child HWNDs are expected to miss the direct lookup.
+        }
+        finally
+        {
+            if (directView != null) Marshal.ReleaseComObject(directView);
+        }
+        return false;
+    }
+
+    private static bool IsSameWindowFamily(IntPtr foregroundHwnd, IntPtr viewHwnd)
+    {
+        if (foregroundHwnd == viewHwnd) return true;
+        return NativeMethods.GetAncestor(foregroundHwnd, NativeMethods.GA_ROOT) == viewHwnd
+            || NativeMethods.GetAncestor(foregroundHwnd, NativeMethods.GA_ROOTOWNER) == viewHwnd
+            || NativeMethods.GetAncestor(viewHwnd, NativeMethods.GA_ROOT) == foregroundHwnd
+            || NativeMethods.GetAncestor(viewHwnd, NativeMethods.GA_ROOTOWNER) == foregroundHwnd;
     }
 
     /// <summary>
@@ -385,6 +826,8 @@ internal sealed class VirtualDesktopService : IDisposable
         }
     }
 }
+
+internal readonly record struct AutoPinViewState(IntPtr ViewHwnd, bool IsPinned);
 
 // Helper to pass readonly Guid fields by ref to COM
 internal static class Unsafe
