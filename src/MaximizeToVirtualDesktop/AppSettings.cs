@@ -83,7 +83,7 @@ internal sealed class AppSettings
     /// How long (in seconds) a desktop must be visited before it counts as "recently used"
     /// for MRU ordering. Visits shorter than this are treated as passing through.
     /// </summary>
-    public int MruThresholdSeconds { get; set; } = 5;
+    public double MruThresholdSeconds { get; set; } = 5;
 
     /// <summary>
     /// When true, any click on the maximize button sends the window to a virtual desktop.

@@ -123,9 +123,11 @@ internal sealed class SettingsDialog : Form
         });
         _numMruThreshold = new NumericUpDown
         {
-            Minimum = 1,
-            Maximum = 60,
-            Value = Math.Clamp(settings.MruThresholdSeconds, 1, 60),
+            Minimum = 0.1m,
+            Maximum = 60m,
+            DecimalPlaces = 1,
+            Increment = 0.1m,
+            Value = Math.Clamp((decimal)settings.MruThresholdSeconds, 0.1m, 60m),
             Location = new Point(220, 82),
             Size = new Size(60, 24),
         };
@@ -370,7 +372,7 @@ internal sealed class SettingsDialog : Form
         _settings.AutoPinHotkeyKey   = _cmbAutoPinKey.SelectedIndex >= 0 ? SupportedKeys[_cmbAutoPinKey.SelectedIndex].Vk : NativeMethods.VK_A;
         _settings.ShowSwitchPopup    = _chkShowSwitchPopup.Checked;
         _settings.InvertShiftClick   = _chkInvertShiftClick.Checked;
-        _settings.MruThresholdSeconds = (int)_numMruThreshold.Value;
+        _settings.MruThresholdSeconds = (double)_numMruThreshold.Value;
     }
 
     private static uint BuildModifiers(CheckBox ctrl, CheckBox alt, CheckBox shift, CheckBox win)
