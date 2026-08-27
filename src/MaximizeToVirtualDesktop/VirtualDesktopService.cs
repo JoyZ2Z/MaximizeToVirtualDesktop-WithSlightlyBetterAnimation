@@ -14,6 +14,12 @@ internal sealed class VirtualDesktopService : IDisposable
     private IVirtualDesktopManager? _manager;
     private IApplicationViewCollection? _viewCollection;
     private IVirtualDesktopPinnedApps? _pinnedApps;
+    // A host HWND can repeatedly fire foreground/state events while its
+    // IApplicationView lives on a different thumbnail/root HWND. The cache is
+    // always revalidated before use, so HWND reuse or a recreated UWP host
+    // cannot target a stale view.
+    private readonly Dictionary<IntPtr, IntPtr> _indirectViewCache = new();
+    private readonly HashSet<IntPtr> _reportedViewIdentities = new();
     private int _buildNumber;
     private bool _disposed;
 
@@ -403,19 +409,33 @@ internal sealed class VirtualDesktopService : IDisposable
     /// </summary>
     public bool TryGetWindowPinnedState(IntPtr hwnd, out bool isPinned)
     {
-        IApplicationView? view = null;
         isPinned = false;
+        return TryResolveAutoPinView(hwnd, out _, out isPinned);
+    }
+
+    /// <summary>
+    /// Retrieves the AUMID only for a resolved application view. AutoPin uses
+    /// this to recognize the Host/Core pair exposed by one legacy UWP app; a
+    /// failed lookup is intentionally non-mutating.
+    /// </summary>
+    public bool TryGetAppUserModelId(IntPtr hwnd, out string? appUserModelId)
+    {
+        appUserModelId = null;
+        IApplicationView? view = null;
         try
         {
-            if (_pinnedApps == null || _viewCollection == null) return false;
+            if (_viewCollection == null) return false;
             _viewCollection.GetViewForHwnd(hwnd, out view);
-            if (view == null) return false;
-            isPinned = _pinnedApps.IsViewPinned(view);
+            if (view == null || view.GetAppUserModelId(out var resolvedId) != 0
+                || string.IsNullOrWhiteSpace(resolvedId))
+            {
+                return false;
+            }
+            appUserModelId = resolvedId;
             return true;
         }
-        catch (Exception ex)
+        catch
         {
-            Trace.WriteLine($"VirtualDesktopService: TryGetWindowPinnedState failed: {ex.Message}");
             return false;
         }
         finally
@@ -482,6 +502,13 @@ internal sealed class VirtualDesktopService : IDisposable
             return true;
         }
 
+        if (TryGetCachedAutoPinView(foregroundHwnd, out var cachedView)
+            && TryGetAutoPinWindowState(cachedView, out desktopId, out isPinned))
+        {
+            viewHwnd = cachedView;
+            return true;
+        }
+
         IObjectArray? views = null;
         var enumeratedAllViews = false;
         try
@@ -514,7 +541,7 @@ internal sealed class VirtualDesktopService : IDisposable
 
                     isPinned = _pinnedApps.IsViewPinned(candidate);
                     viewHwnd = candidateHwnd;
-                    Trace.WriteLine($"VirtualDesktopService: resolved foreground {foregroundHwnd} to view {viewHwnd}.");
+                    ReportIndirectViewResolution(foregroundHwnd, viewHwnd, "foreground-family");
                     return true;
                 }
                 finally
@@ -571,7 +598,7 @@ internal sealed class VirtualDesktopService : IDisposable
 
             isPinned = _pinnedApps.IsViewPinned(focusedView);
             viewHwnd = focusedHwnd;
-            Trace.WriteLine($"VirtualDesktopService: resolved foreground {foregroundHwnd} through focused view {viewHwnd}.");
+            ReportIndirectViewResolution(foregroundHwnd, viewHwnd, "foreground-focus");
             return true;
         }
         catch (Exception ex)
@@ -608,6 +635,13 @@ internal sealed class VirtualDesktopService : IDisposable
             return true;
         }
 
+        if (TryGetCachedAutoPinView(hwnd, out var cachedView)
+            && TryGetDirectAutoPinViewState(cachedView, out isPinned))
+        {
+            viewHwnd = cachedView;
+            return true;
+        }
+
         IObjectArray? views = null;
         try
         {
@@ -630,6 +664,7 @@ internal sealed class VirtualDesktopService : IDisposable
 
                     isPinned = _pinnedApps.IsViewPinned(candidate);
                     viewHwnd = candidateHwnd;
+                    ReportIndirectViewResolution(hwnd, viewHwnd, "window-family");
                     return true;
                 }
                 finally
@@ -669,6 +704,12 @@ internal sealed class VirtualDesktopService : IDisposable
                 results[hwnd] = new AutoPinViewState(hwnd, isPinned);
                 unresolved.Remove(hwnd);
             }
+            else if (TryGetCachedAutoPinView(hwnd, out var cachedView)
+                && TryGetDirectAutoPinViewState(cachedView, out isPinned))
+            {
+                results[hwnd] = new AutoPinViewState(cachedView, isPinned);
+                unresolved.Remove(hwnd);
+            }
         }
         if (unresolved.Count == 0) return results;
 
@@ -702,6 +743,7 @@ internal sealed class VirtualDesktopService : IDisposable
                     foreach (var source in matchingSources)
                     {
                         results[source] = new AutoPinViewState(candidateHwnd, isPinned);
+                        ReportIndirectViewResolution(source, candidateHwnd, "batch-family");
                         unresolved.Remove(source);
                     }
                 }
@@ -733,6 +775,7 @@ internal sealed class VirtualDesktopService : IDisposable
             _viewCollection.GetViewForHwnd(hwnd, out directView);
             if (directView != null)
             {
+                ReportViewIdentity(hwnd, directView, hwnd, "direct");
                 isPinned = _pinnedApps.IsViewPinned(directView);
                 return true;
             }
@@ -745,6 +788,25 @@ internal sealed class VirtualDesktopService : IDisposable
         {
             if (directView != null) Marshal.ReleaseComObject(directView);
         }
+        return false;
+    }
+
+    private bool TryGetCachedAutoPinView(IntPtr sourceHwnd, out IntPtr viewHwnd)
+    {
+        viewHwnd = IntPtr.Zero;
+        lock (_indirectViewCache)
+        {
+            if (!_indirectViewCache.TryGetValue(sourceHwnd, out viewHwnd))
+                return false;
+        }
+        if (NativeMethods.IsWindow(viewHwnd) && IsSameWindowFamily(sourceHwnd, viewHwnd))
+            return true;
+
+        lock (_indirectViewCache)
+        {
+            _indirectViewCache.Remove(sourceHwnd);
+        }
+        viewHwnd = IntPtr.Zero;
         return false;
     }
 
@@ -762,19 +824,43 @@ internal sealed class VirtualDesktopService : IDisposable
     /// </summary>
     public bool PinWindow(IntPtr hwnd)
     {
+        return SetWindowPinnedState(hwnd, pinned: true);
+    }
+
+    /// <summary>
+    /// Unpin a window's view from all virtual desktops.
+    /// </summary>
+    public bool UnpinWindow(IntPtr hwnd)
+    {
+        return SetWindowPinnedState(hwnd, pinned: false);
+    }
+
+    /// <summary>
+    /// Mutates the same application view used by AutoPin observation. Packaged
+    /// applications often expose a host HWND without a direct view; resolving
+    /// its thumbnail/root view first keeps read and write paths consistent.
+    /// </summary>
+    private bool SetWindowPinnedState(IntPtr hwnd, bool pinned)
+    {
         IApplicationView? view = null;
         try
         {
-            if (_pinnedApps == null || _viewCollection == null) return false;
-            _viewCollection.GetViewForHwnd(hwnd, out view);
-            if (view == null) return false;
-            _pinnedApps.PinView(view);
-            Trace.WriteLine($"VirtualDesktopService: Pinned window {hwnd}");
+            if (_pinnedApps == null || !TryGetApplicationViewForMutation(hwnd, out view, out var viewHwnd))
+            {
+                Trace.WriteLine($"VirtualDesktopService[UWP-View]: unresolved source={hwnd}; pin mutation skipped.");
+                return false;
+            }
+            var resolvedView = view;
+            if (resolvedView == null) return false;
+            if (pinned) _pinnedApps.PinView(resolvedView);
+            else _pinnedApps.UnpinView(resolvedView);
+            Trace.WriteLine($"VirtualDesktopService: {(pinned ? "Pinned" : "Unpinned")} window {hwnd} via view {viewHwnd}");
             return true;
         }
         catch (Exception ex)
         {
-            Trace.WriteLine($"VirtualDesktopService: PinWindow failed: {ex.Message}");
+            Trace.WriteLine(
+                $"VirtualDesktopService: {(pinned ? "PinWindow" : "UnpinWindow")} failed for {hwnd}: {ex.Message}");
             return false;
         }
         finally
@@ -784,29 +870,130 @@ internal sealed class VirtualDesktopService : IDisposable
     }
 
     /// <summary>
-    /// Unpin a window's view from all virtual desktops.
+    /// Returns the actual COM view that owns a source HWND. Unlike a
+    /// source-&gt;thumbnail HWND round-trip, this preserves the family-resolved
+    /// view object for the following PinView/UnpinView call.
     /// </summary>
-    public bool UnpinWindow(IntPtr hwnd)
+    private bool TryGetApplicationViewForMutation(
+        IntPtr sourceHwnd, out IApplicationView? view, out IntPtr viewHwnd)
     {
-        IApplicationView? view = null;
+        view = null;
+        viewHwnd = IntPtr.Zero;
         try
         {
-            if (_pinnedApps == null || _viewCollection == null) return false;
-            _viewCollection.GetViewForHwnd(hwnd, out view);
-            if (view == null) return false;
-            _pinnedApps.UnpinView(view);
-            Trace.WriteLine($"VirtualDesktopService: Unpinned window {hwnd}");
-            return true;
+            if (_viewCollection == null) return false;
+            _viewCollection.GetViewForHwnd(sourceHwnd, out view);
+            if (view != null)
+            {
+                viewHwnd = sourceHwnd;
+                return true;
+            }
+
+            if (TryGetCachedAutoPinView(sourceHwnd, out var cachedView))
+            {
+                _viewCollection.GetViewForHwnd(cachedView, out view);
+                if (view != null)
+                {
+                    viewHwnd = cachedView;
+                    return true;
+                }
+            }
+
+            IObjectArray? views = null;
+            try
+            {
+                if (_viewCollection.GetViewsByZOrder(out views) != 0 || views == null)
+                    return false;
+                views.GetCount(out var count);
+                var viewGuid = typeof(IApplicationView).GUID;
+                for (var index = 0; index < count; index++)
+                {
+                    IApplicationView? candidate = null;
+                    try
+                    {
+                        views.GetAt(index, ref viewGuid, out var unknown);
+                        candidate = unknown as IApplicationView;
+                        if (candidate == null
+                            || candidate.GetThumbnailWindow(out var candidateHwnd) != 0
+                            || candidateHwnd == IntPtr.Zero
+                            || !IsSameWindowFamily(sourceHwnd, candidateHwnd))
+                        {
+                            continue;
+                        }
+                        view = candidate;
+                        viewHwnd = candidateHwnd;
+                        candidate = null;
+                        ReportIndirectViewResolution(sourceHwnd, viewHwnd, "mutation-family");
+                        return true;
+                    }
+                    finally
+                    {
+                        if (candidate != null) Marshal.ReleaseComObject(candidate);
+                    }
+                }
+            }
+            finally
+            {
+                if (views != null) Marshal.ReleaseComObject(views);
+            }
         }
         catch (Exception ex)
         {
-            Trace.WriteLine($"VirtualDesktopService: UnpinWindow failed: {ex.Message}");
-            return false;
+            Trace.WriteLine(
+                $"VirtualDesktopService[UWP-View]: mutation view resolution failed for {sourceHwnd}: {ex.Message}");
         }
-        finally
+
+        if (view != null)
         {
-            if (view != null) Marshal.ReleaseComObject(view);
+            Marshal.ReleaseComObject(view);
+            view = null;
         }
+        viewHwnd = IntPtr.Zero;
+        return false;
+    }
+
+    private void ReportIndirectViewResolution(IntPtr sourceHwnd, IntPtr viewHwnd, string route)
+    {
+        if (sourceHwnd == IntPtr.Zero || viewHwnd == IntPtr.Zero || sourceHwnd == viewHwnd) return;
+        lock (_indirectViewCache)
+        {
+            if (_indirectViewCache.TryGetValue(sourceHwnd, out var previous)
+                && previous == viewHwnd)
+            {
+                return;
+            }
+            _indirectViewCache[sourceHwnd] = viewHwnd;
+        }
+        Trace.WriteLine(
+            $"VirtualDesktopService[UWP-View]: route={route}; "
+            + $"{WindowStateHelper.DescribeWindowForDiagnostics(sourceHwnd)}; "
+            + $"viewHwnd={viewHwnd}.");
+    }
+
+    private void ReportViewIdentity(
+        IntPtr sourceHwnd, IApplicationView view, IntPtr viewHwnd, string route)
+    {
+        lock (_reportedViewIdentities)
+        {
+            if (!_reportedViewIdentities.Add(viewHwnd)) return;
+        }
+        var appUserModelId = "<unavailable>";
+        try
+        {
+            if (view.GetAppUserModelId(out var resolvedId) == 0
+                && !string.IsNullOrWhiteSpace(resolvedId))
+            {
+                appUserModelId = resolvedId;
+            }
+        }
+        catch
+        {
+            // View identity diagnostics must not affect application behavior.
+        }
+        Trace.WriteLine(
+            $"VirtualDesktopService[UWP-View]: route={route}; "
+            + $"{WindowStateHelper.DescribeWindowForDiagnostics(sourceHwnd)}; "
+            + $"viewHwnd={viewHwnd}; aumid={appUserModelId}.");
     }
 
     private void ReleaseComObjects()

@@ -256,13 +256,54 @@ internal sealed class AutoPinObservationBuilder
                     snapCovers.Where(cover => cover.ZOrder < window.ZOrder)
                         .Select(cover => cover.Frame),
                     SnapCoverageTolerancePixels);
+            var uwpPresentationRole = WindowStateHelper.GetUwpPresentationWindowRole(window.Hwnd);
             result.Add(new AutoPinWindowObservation(
                 viewHwnd, processId, IsEligible: true,
                 window.IsMinimized, window.IsDisplayed, window.ZOrder,
                 _vds.IsWindowOnCurrentDesktop(viewHwnd), isPinned,
-                isCoveredBySnapMembers));
+                isCoveredBySnapMembers,
+                UwpPresentationRole: uwpPresentationRole));
         }
-        return result.ToArray();
+        return MarkUwpHostCorePairs(result);
+    }
+
+    /// <summary>
+    /// A legacy UWP app exposes an ApplicationFrameWindow host and a separate
+    /// CoreWindow with the same AUMID. Their minimized states disagree by
+    /// design: the host minimizes while the CoreWindow merely becomes hidden.
+    /// Mark only that precise pair as one logical AutoPin application.
+    /// </summary>
+    private AutoPinWindowObservation[] MarkUwpHostCorePairs(
+        IReadOnlyList<AutoPinWindowObservation> windows)
+    {
+        var pairs = windows
+            .Where(window => window.UwpPresentationRole != UwpPresentationWindowRole.None)
+            .Select(window =>
+            {
+                var aumid = _vds.TryGetAppUserModelId(window.Hwnd, out var resolved)
+                    ? resolved
+                    : null;
+                return (Window: window, Aumid: aumid);
+            })
+            .Where(item => !string.IsNullOrWhiteSpace(item.Aumid))
+            .GroupBy(item => item.Aumid!, StringComparer.Ordinal)
+            .Where(group => group.Any(item => item.Window.UwpPresentationRole == UwpPresentationWindowRole.Host)
+                && group.Any(item => item.Window.UwpPresentationRole == UwpPresentationWindowRole.Core))
+            .ToDictionary(group => group.Key, group => group.Key, StringComparer.Ordinal);
+
+        if (pairs.Count == 0) return windows.ToArray();
+
+        return windows.Select(window =>
+        {
+            if (window.UwpPresentationRole == UwpPresentationWindowRole.None
+                || !_vds.TryGetAppUserModelId(window.Hwnd, out var aumid)
+                || aumid is null
+                || !pairs.TryGetValue(aumid, out var logicalId))
+            {
+                return window;
+            }
+            return window with { LogicalApplicationId = $"uwp:{logicalId}" };
+        }).ToArray();
     }
 
     private static bool TryGetFrame(nint hwnd, out SnapRect frame)
