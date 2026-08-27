@@ -45,4 +45,12 @@ internal static class AutoPinWindowEventPolicy
     public static bool ShouldPinBeforeDesktopStability(
         uint eventType, bool isMinimized) =>
         isMinimized && eventType is MinimizeStart or WindowStateChange;
+
+    /// <summary>
+    /// A confirmed urgent pin already reconciles the only state changed by a
+    /// minimize event. Retain the full observation when that narrow write
+    /// could not be confirmed, so the existing recovery path remains intact.
+    /// </summary>
+    public static bool RequiresFullReconciliationAfterMinimize(
+        bool urgentPinConfirmed) => !urgentPinConfirmed;
 }

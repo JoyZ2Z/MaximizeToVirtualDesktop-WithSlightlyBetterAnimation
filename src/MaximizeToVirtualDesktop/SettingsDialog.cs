@@ -28,6 +28,7 @@ internal sealed class SettingsDialog : Form
     private readonly CheckBox _chkInvertShiftClick;
     private readonly CheckBox _chkShowSwitchPopup;
     private readonly NumericUpDown _numMruThreshold;
+    private readonly ComboBox _cmbAutoSortMode;
     private Button _btnStartup = null!;
 
     // (display name, VK code) pairs for the key combo boxes
@@ -95,7 +96,7 @@ internal sealed class SettingsDialog : Form
         y += grpAutoPin.Height + 12;
 
         // Behavior group
-        var grpBehavior = new GroupBox { Text = "Behavior", Location = new Point(margin, y), Size = new Size(grpW, 160) };
+        var grpBehavior = new GroupBox { Text = "Behavior", Location = new Point(margin, y), Size = new Size(grpW, 194) };
         Controls.Add(grpBehavior);
         _chkShowSwitchPopup = new CheckBox
         {
@@ -132,6 +133,24 @@ internal sealed class SettingsDialog : Form
             Size = new Size(60, 24),
         };
         grpBehavior.Controls.Add(_numMruThreshold);
+        grpBehavior.Controls.Add(new Label
+        {
+            Text = "Auto-sort desktops:",
+            AutoSize = true,
+            Location = new Point(10, 120),
+        });
+        _cmbAutoSortMode = new ComboBox
+        {
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            Location = new Point(160, 116),
+            Size = new Size(220, 24),
+        };
+        _cmbAutoSortMode.Items.AddRange([
+            "Off",
+            "By stay time",
+        ]);
+        _cmbAutoSortMode.SelectedIndex = (int)settings.ResolveAutoSortMode();
+        grpBehavior.Controls.Add(_cmbAutoSortMode);
         y += grpBehavior.Height + 12;
 
         // Manage Startup group
@@ -373,6 +392,7 @@ internal sealed class SettingsDialog : Form
         _settings.ShowSwitchPopup    = _chkShowSwitchPopup.Checked;
         _settings.InvertShiftClick   = _chkInvertShiftClick.Checked;
         _settings.MruThresholdSeconds = (double)_numMruThreshold.Value;
+        _settings.SetAutoSortMode((DesktopAutoSortMode)Math.Max(0, _cmbAutoSortMode.SelectedIndex));
     }
 
     private static uint BuildModifiers(CheckBox ctrl, CheckBox alt, CheckBox shift, CheckBox win)

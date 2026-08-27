@@ -112,6 +112,39 @@ internal sealed class AutoPinService : IDisposable
         || _transitionBarrier.IsActive || _stabilityTimer.Enabled);
 
     /// <summary>
+    /// Raised only after AutoPin has completed its own stable observation and
+    /// applied it. Consumers may then perform non-AutoPin work for this desktop.
+    /// </summary>
+    public event Action<Guid>? StableDesktopObservationApplied;
+
+    /// <summary>
+    /// Receives the shared desktop-ID probe. This starts the existing write
+    /// barrier sooner than the one-second recovery timer, without changing the
+    /// transition's pin/unpin rules.
+    /// </summary>
+    public void ObserveDesktopChange(Guid desktopId)
+    {
+        if (_disposed) return;
+        void Handle()
+        {
+            if (desktopId == _lastObservedDesktop) return;
+            _lastObservedDesktop = desktopId;
+            _observationDirty = false;
+            if (!_enabled && _restorePending)
+            {
+                _writeGate.Close();
+                _restoreRetryIntervalMs = StabilityProbeIntervalMs;
+                _restoreTimer.Interval = _restoreRetryIntervalMs;
+                _restoreNotBefore = DateTime.UtcNow.AddMilliseconds(MinimumSwitchFreezeMs);
+                return;
+            }
+            BeginSwitchFreeze("desktop changed by shared probe");
+        }
+        if (_syncControl.InvokeRequired) PostToUi(Handle);
+        else Handle();
+    }
+
+    /// <summary>
     /// A tracked MVD fullscreen window is outside AutoPin's domain until it is
     /// restored and untracked. Drop both lifecycle and baseline state while the
     /// FullScreenManager suspension still owns the transition.
@@ -298,17 +331,7 @@ internal sealed class AutoPinService : IDisposable
 
         if (desktop != _lastObservedDesktop)
         {
-            _lastObservedDesktop = desktop;
-            _observationDirty = false;
-            if (!_enabled && _restorePending)
-            {
-                _writeGate.Close();
-                _restoreRetryIntervalMs = StabilityProbeIntervalMs;
-                _restoreTimer.Interval = _restoreRetryIntervalMs;
-                _restoreNotBefore = DateTime.UtcNow.AddMilliseconds(MinimumSwitchFreezeMs);
-                return;
-            }
-            BeginSwitchFreeze("desktop changed by probe");
+            ObserveDesktopChange(desktop.Value);
             return;
         }
 
@@ -386,7 +409,13 @@ internal sealed class AutoPinService : IDisposable
             if (activation.HasValue && (appliedImmediateObservation
                     || TryProtectForeground(activation.Value)))
                 _foregroundTracker.ConfirmProtection(activation.Value);
-            QueueVisibleRelationshipReconciliation();
+            if (AutoPinForegroundEventPolicy.RequiresVisibleRelationshipReconciliation(
+                    IsTransitioning,
+                    isFullscreenAnchorForeground,
+                    isSnapWorkspaceMemberForeground))
+            {
+                QueueVisibleRelationshipReconciliation();
+            }
         }
 
         if (_syncControl.InvokeRequired) PostToUi(HandleForeground);
@@ -461,8 +490,12 @@ internal sealed class AutoPinService : IDisposable
             NativeMethods.GetWindowThreadProcessId(hwnd, out var processId);
             if (processId != 0)
                 _minimizeRetryTracker.Track(new AutoPinWindowIdentity(hwnd, processId));
-            TryPinUrgentMinimizedWindow(eventType, hwnd);
-            QueueVisibleRelationshipReconciliation();
+            var urgentPinConfirmed = TryPinUrgentMinimizedWindow(eventType, hwnd);
+            if (AutoPinWindowEventPolicy.RequiresFullReconciliationAfterMinimize(
+                    urgentPinConfirmed))
+            {
+                QueueVisibleRelationshipReconciliation();
+            }
         }
 
         if (_syncControl.InvokeRequired) PostToUi(Reconcile);
@@ -714,6 +747,7 @@ internal sealed class AutoPinService : IDisposable
             {
                 Trace.WriteLine(
                     $"AutoPinService[t={Environment.TickCount64}]: applied stable post-switch observation.");
+                StableDesktopObservationApplied?.Invoke(observation.DesktopId);
                 return;
             }
 

@@ -13,6 +13,9 @@ internal sealed class SnapWorkspaceService : IDisposable
     private const int ProbeIntervalMs = 500;
     private const int StableLayoutMs = 300;
     private const int WorkspaceHealthProbeMs = 3000;
+    // WinEvent hooks wake the service for real work. This is only a recovery
+    // heartbeat for a missed desktop-switch notification.
+    private const int IdleDesktopVerificationMs = 3000;
     private const int GeometryTolerancePixels = 4;
     private const int EmptyWorkspaceGraceMs = 800;
 
@@ -30,7 +33,6 @@ internal sealed class SnapWorkspaceService : IDisposable
     private IntPtr _locationHook;
     private IntPtr _moveSizeHook;
     private IntPtr _destroyHook;
-    private IntPtr _desktopSwitchHook;
     private bool _dirty = true;
     private int _geometryDirtyNotification;
     // 1 = geometry is still moving; 2 = a move/resize completed.
@@ -44,6 +46,7 @@ internal sealed class SnapWorkspaceService : IDisposable
     private Guid? _lastDesktopId;
     private DateTime _desktopStableAfter;
     private DateTime _nextWorkspaceHealthProbe;
+    private DateTime _nextIdleDesktopVerification;
     private DateTime _layoutObservationAfter;
 
     public SnapWorkspaceService(
@@ -63,6 +66,7 @@ internal sealed class SnapWorkspaceService : IDisposable
         _windowEventProc = OnWindowEvent;
         _probeTimer = new System.Windows.Forms.Timer { Interval = ProbeIntervalMs };
         _probeTimer.Tick += (_, _) => Probe();
+        _autoPin.StableDesktopObservationApplied += OnAutoPinDesktopSettled;
     }
 
     public void Start()
@@ -80,10 +84,6 @@ internal sealed class SnapWorkspaceService : IDisposable
             NativeMethods.EVENT_OBJECT_DESTROY,
             NativeMethods.EVENT_OBJECT_DESTROY,
             IntPtr.Zero, _windowEventProc, 0, 0, NativeMethods.WINEVENT_OUTOFCONTEXT);
-        _desktopSwitchHook = NativeMethods.SetWinEventHook(
-            NativeMethods.EVENT_SYSTEM_DESKTOPSWITCH,
-            NativeMethods.EVENT_SYSTEM_DESKTOPSWITCH,
-            IntPtr.Zero, _windowEventProc, 0, 0, NativeMethods.WINEVENT_OUTOFCONTEXT);
         _probeTimer.Start();
         Trace.WriteLine("SnapWorkspaceService: started.");
     }
@@ -92,17 +92,6 @@ internal sealed class SnapWorkspaceService : IDisposable
         int objectId, int childId, uint eventThreadId, uint eventTime)
     {
         if (_disposed) return;
-        if (eventType == NativeMethods.EVENT_SYSTEM_DESKTOPSWITCH)
-        {
-            PostToUi(() =>
-            {
-                _desktopStableAfter = DateTime.UtcNow.AddMilliseconds(500);
-                _dirty = true;
-                Interlocked.Exchange(ref _readoptionRequested, 1);
-                foreach (var gate in _layoutGates.Values) gate.Reset();
-            });
-            return;
-        }
         if (eventType != NativeMethods.EVENT_SYSTEM_MOVESIZEEND
             && (objectId != NativeMethods.OBJID_WINDOW || childId != 0)) return;
         if (eventType == NativeMethods.EVENT_SYSTEM_MOVESIZEEND)
@@ -118,8 +107,10 @@ internal sealed class SnapWorkspaceService : IDisposable
         {
             // Dragging emits LOCATIONCHANGE continuously. Probe consumes this
             // flag at most twice per second on the UI thread.
-            Interlocked.Exchange(ref _geometryDirtyNotification, 1);
-            Interlocked.Exchange(ref _layoutObservationNotification, 1);
+            if (Volatile.Read(ref _geometryDirtyNotification) == 0)
+                Interlocked.Exchange(ref _geometryDirtyNotification, 1);
+            if (Volatile.Read(ref _layoutObservationNotification) == 0)
+                Interlocked.Exchange(ref _layoutObservationNotification, 1);
             return;
         }
         PostToUi(() =>
@@ -127,15 +118,49 @@ internal sealed class SnapWorkspaceService : IDisposable
             if (eventType == NativeMethods.EVENT_OBJECT_DESTROY)
             {
                 var workspace = _tracker.GetByMember(hwnd);
-                if (workspace is not null)
-                {
-                    workspace.Detach(hwnd);
-                    _geometryMismatchSince.Remove(hwnd);
-                    if (workspace.IsEmpty) RemoveWorkspace(workspace);
-                }
+                if (workspace is null) return;
+                workspace.Detach(hwnd);
+                _geometryMismatchSince.Remove(hwnd);
+                if (workspace.IsEmpty) RemoveWorkspace(workspace);
             }
-            _dirty = true;
         });
+    }
+
+    /// <summary>
+    /// A desktop switch alone cannot create a Snap layout. Once AutoPin has
+    /// settled the same desktop, recheck existing workspace members only; do
+    /// not enumerate every top-level window on a normal desktop.
+    /// </summary>
+    public void ObserveDesktopChange(Guid desktopId)
+    {
+        if (_disposed) return;
+        _lastDesktopId = desktopId;
+        _desktopStableAfter = DateTime.MaxValue;
+        // Discard work queued by the desktop we just left. A desktop switch by
+        // itself must not be interpreted as a new native Snap arrangement.
+        _dirty = false;
+        Interlocked.Exchange(ref _geometryDirtyNotification, 0);
+        Interlocked.Exchange(ref _layoutObservationNotification, 0);
+        _layoutObservationAfter = DateTime.MinValue;
+        foreach (var gate in _layoutGates.Values) gate.Reset();
+    }
+
+    public void ObserveDesktopSettledWithoutAutoPin(Guid desktopId)
+    {
+        if (_disposed || _autoPin.Enabled) return;
+        OnDesktopSettled(desktopId);
+    }
+
+    private void OnAutoPinDesktopSettled(Guid desktopId) => OnDesktopSettled(desktopId);
+
+    private void OnDesktopSettled(Guid desktopId)
+    {
+        if (_disposed || _lastDesktopId != desktopId) return;
+        _desktopStableAfter = DateTime.UtcNow;
+        var workspace = _tracker.GetByDesktop(desktopId);
+        if (workspace is null) return;
+        _dirty = true;
+        Interlocked.Exchange(ref _readoptionRequested, 1);
     }
 
     private void Probe()
@@ -143,14 +168,38 @@ internal sealed class SnapWorkspaceService : IDisposable
         if (_disposed || _inFlight) return;
         var geometryChanged = Interlocked.Exchange(ref _geometryDirtyNotification, 0) != 0;
         var layoutSignal = Interlocked.Exchange(ref _layoutObservationNotification, 0);
-        if (DateTime.UtcNow < _desktopStableAfter) return;
+        var now = DateTime.UtcNow;
+        if (now < _desktopStableAfter) return;
+        var requiresIdleVerification = now >= _nextIdleDesktopVerification;
+        if (!geometryChanged && layoutSignal == 0 && !_dirty)
+        {
+            if (!requiresIdleVerification) return;
+            var verifiedDesktopId = _vds.GetCurrentDesktopId();
+            if (!verifiedDesktopId.HasValue) return;
+            _nextIdleDesktopVerification = now.AddMilliseconds(IdleDesktopVerificationMs);
+            if (_lastDesktopId != verifiedDesktopId)
+            {
+                // Recovery only: the shared coordinator normally reports this
+                // within 250ms. Do not treat the missed notification as a Snap
+                // layout signal.
+                ObserveDesktopChange(verifiedDesktopId.Value);
+                _desktopStableAfter = now.AddMilliseconds(500);
+                return;
+            }
+            var idleWorkspace = _tracker.GetByDesktop(verifiedDesktopId.Value);
+            if (idleWorkspace is null) return;
+            ObserveWorkspaceMembers(idleWorkspace, shouldReadopt: false);
+            _nextWorkspaceHealthProbe = now.AddMilliseconds(WorkspaceHealthProbeMs);
+            return;
+        }
         var currentDesktopId = _vds.GetCurrentDesktopId();
         if (!currentDesktopId.HasValue) return;
+        _nextIdleDesktopVerification = now.AddMilliseconds(IdleDesktopVerificationMs);
         if (_lastDesktopId != currentDesktopId)
         {
             _lastDesktopId = currentDesktopId;
             _dirty = true;
-            _desktopStableAfter = DateTime.UtcNow.AddMilliseconds(500);
+            _desktopStableAfter = now.AddMilliseconds(500);
             foreach (var gate in _layoutGates.Values) gate.Reset();
             return;
         }
@@ -169,7 +218,7 @@ internal sealed class SnapWorkspaceService : IDisposable
         if (currentWorkspace is not null)
         {
             if (geometryChanged) _dirty = true;
-            var workspaceNow = DateTime.UtcNow;
+            var workspaceNow = now;
             if (!_dirty && workspaceNow < _nextWorkspaceHealthProbe) return;
             var shouldReadopt = Interlocked.Exchange(ref _readoptionRequested, 0) != 0;
             ObserveWorkspaceMembers(currentWorkspace, shouldReadopt);
@@ -187,10 +236,10 @@ internal sealed class SnapWorkspaceService : IDisposable
         // move/resize end is already a stable boundary and can be observed at
         // the next probe tick.
         if (layoutSignal == 2)
-            _layoutObservationAfter = DateTime.UtcNow;
+            _layoutObservationAfter = now;
         else if (layoutSignal == 1)
-            _layoutObservationAfter = DateTime.UtcNow.AddMilliseconds(StableLayoutMs);
-        if (DateTime.UtcNow < _layoutObservationAfter) return;
+            _layoutObservationAfter = now.AddMilliseconds(StableLayoutMs);
+        if (now < _layoutObservationAfter) return;
         if (_layoutObservationAfter != DateTime.MinValue)
         {
             _layoutObservationAfter = DateTime.MinValue;
@@ -203,7 +252,6 @@ internal sealed class SnapWorkspaceService : IDisposable
                 isFullscreenDesktop: desktopKind == ManagedDesktopKind.Fullscreen)) return;
 
         var layouts = ObserveCompletedLayouts(currentDesktopId.Value);
-        var now = DateTime.UtcNow;
         CompletedSnapLayout? stable = null;
         foreach (var layout in layouts)
         {
@@ -789,8 +837,9 @@ internal sealed class SnapWorkspaceService : IDisposable
         _probeTimer.Stop();
         _probeTimer.Dispose();
         foreach (var hook in new[]
-                 { _locationHook, _moveSizeHook, _destroyHook, _desktopSwitchHook })
+                 { _locationHook, _moveSizeHook, _destroyHook })
             if (hook != IntPtr.Zero) NativeMethods.UnhookWinEvent(hook);
-        _locationHook = _moveSizeHook = _destroyHook = _desktopSwitchHook = IntPtr.Zero;
+        _autoPin.StableDesktopObservationApplied -= OnAutoPinDesktopSettled;
+        _locationHook = _moveSizeHook = _destroyHook = IntPtr.Zero;
     }
 }

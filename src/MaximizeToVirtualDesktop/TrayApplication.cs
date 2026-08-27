@@ -29,6 +29,7 @@ internal sealed class TrayApplication : Form
     private readonly WindowMonitor _monitor;
     private readonly MaximizeButtonHook _mouseHook;
     private readonly AutoPinService _autoPin;
+    private readonly DesktopTransitionCoordinator _desktopTransitions;
     private readonly System.Windows.Forms.Timer _cleanupTimer;
     private readonly System.Windows.Forms.Timer _emptyDesktopTimer;
     private readonly System.Windows.Forms.Timer _desktopOrderTimer;
@@ -39,12 +40,14 @@ internal sealed class TrayApplication : Form
     private ToolStripMenuItem _autoPinOnItem = null!;
     private ToolStripMenuItem _autoPinTrackWindowsItem = null!;
     private ToolStripMenuItem _autoSortItem = null!;
+    private ToolStripMenuItem _autoSortOffItem = null!;
+    private ToolStripMenuItem _autoSortTimeItem = null!;
     private readonly List<Guid> _desktopMru = new();
     private Guid? _mainDesktopId;
     private Guid? _currentDesktopId;
     private Guid? _confirmedDesktopId;
     private DateTime _desktopEnterTime;
-    private DateTime _sortFreezeUntil;
+    private bool _sortAfterDesktopSettlement;
 
     internal static readonly UpdatumManager Updater = new("shanselman", "MaximizeToVirtualDesktop")
     {
@@ -80,6 +83,10 @@ internal sealed class TrayApplication : Form
         _snapTracker = new SnapWorkspaceTracker();
         _autoPin = new AutoPinService(
             _vds, _tracker, _snapTracker, this, () => _mainDesktopId);
+        _desktopTransitions = new DesktopTransitionCoordinator(_vds);
+        _desktopTransitions.DesktopChanged += OnSharedDesktopChanged;
+        _desktopTransitions.DesktopSettled += OnSharedDesktopSettled;
+        _autoPin.StableDesktopObservationApplied += OnAutoPinDesktopSettled;
         _manager = new FullScreenManager(_vds, _tracker, _settings, this, _autoPin);
         _snapWorkspaceService = new SnapWorkspaceService(
             _vds, _tracker, _snapTracker, _autoPin, this, () => _mainDesktopId);
@@ -108,6 +115,7 @@ internal sealed class TrayApplication : Form
         // as a low-cost fallback behind the desktop-switch event pipeline.
         _desktopOrderTimer = new System.Windows.Forms.Timer { Interval = 500 };
         _desktopOrderTimer.Tick += (_, _) => TrackDesktopUsage();
+
     }
 
     protected override void OnHandleCreated(EventArgs e)
@@ -183,7 +191,9 @@ internal sealed class TrayApplication : Form
         EnsureMainDesktop();
 
         // If auto-sort is enabled, apply it once on startup.
-        if (_settings.AutoSortEnabled)
+        _settings.SetAutoSortMode(_settings.ResolveAutoSortMode());
+        _settings.Save();
+        if (_settings.ResolveAutoSortMode() != DesktopAutoSortMode.Off)
         {
             ScheduleSort();
         }
@@ -202,12 +212,13 @@ internal sealed class TrayApplication : Form
 
     private void StartMonitoring()
     {
+        _desktopTransitions.Start();
         _monitor.Start();
         _snapWorkspaceService.Start();
         _mouseHook.Install();
         _cleanupTimer.Start();
         _emptyDesktopTimer.Start();
-        _desktopOrderTimer.Start();
+        UpdateDesktopUsageMonitoring();
 
         // Register hotkey if not already registered
         if (!NativeMethods.RegisterHotKey(Handle, HOTKEY_ID,
@@ -474,32 +485,44 @@ internal sealed class TrayApplication : Form
         _ => "Off",
     };
 
-    private void ToggleAutoSort()
+    private void SelectAutoSortMode(DesktopAutoSortMode mode)
     {
-        var enabled = !_settings.AutoSortEnabled;
-        _settings.AutoSortEnabled = enabled;
+        _settings.SetAutoSortMode(mode);
         _settings.Save();
+        UpdateDesktopUsageMonitoring();
         UpdateAutoSortMenuItem();
 
-        if (enabled)
+        if (mode != DesktopAutoSortMode.Off)
         {
             // Apply the current MRU order immediately.
             ScheduleSort();
         }
 
         NotificationOverlay.ShowNotification(
-            enabled ? "↔ Auto-sort Enabled" : "↔ Auto-sort Disabled",
-            enabled ? "Desktops reorder by recent use" : "Desktop order left unchanged",
+            mode switch
+            {
+                DesktopAutoSortMode.TimeBased => "↔ Auto-sort: stay time",
+                _ => "↔ Auto-sort Off",
+            },
+            mode switch
+            {
+                DesktopAutoSortMode.TimeBased => "Desktops reorder after the configured stay time",
+                _ => "Desktop order left unchanged",
+            },
             IntPtr.Zero);
-        Trace.WriteLine($"TrayApplication: Auto-sort {(enabled ? "enabled" : "disabled")}.");
+        Trace.WriteLine($"TrayApplication: Auto-sort mode selected: {mode}.");
     }
 
     private void UpdateAutoSortMenuItem()
     {
-        _autoSortItem.Checked = _settings.AutoSortEnabled;
-        _autoSortItem.Text = _settings.AutoSortEnabled
-            ? "Auto-sort Desktops by Recent Use: ON"
-            : "Auto-sort Desktops by Recent Use: OFF";
+        var mode = _settings.ResolveAutoSortMode();
+        _autoSortOffItem.Checked = mode == DesktopAutoSortMode.Off;
+        _autoSortTimeItem.Checked = mode == DesktopAutoSortMode.TimeBased;
+        _autoSortItem.Text = $"Auto-sort: {mode switch
+        {
+            DesktopAutoSortMode.TimeBased => "By stay time",
+            _ => "Off",
+        }}";
     }
 
     private void EnsureMainDesktop(List<Guid>? allDesktopIds = null)
@@ -533,7 +556,13 @@ internal sealed class TrayApplication : Form
     /// </summary>
     private void TrackDesktopUsage()
     {
-        var id = _vds.GetCurrentDesktopId();
+        if (_settings.ResolveAutoSortMode() != DesktopAutoSortMode.TimeBased) return;
+        TrackDesktopUsage(_vds.GetCurrentDesktopId());
+    }
+
+    private void TrackDesktopUsage(Guid? id)
+    {
+        if (_settings.ResolveAutoSortMode() != DesktopAutoSortMode.TimeBased) return;
         if (id == null) return;
 
         var now = DateTime.UtcNow;
@@ -541,7 +570,6 @@ internal sealed class TrayApplication : Form
 
         if (switched)
         {
-            _sortFreezeUntil = now.AddMilliseconds(850);
             // Record the previous desktop if we stayed there long enough.
             var oldId = _currentDesktopId;
             if (oldId != null
@@ -553,12 +581,13 @@ internal sealed class TrayApplication : Form
             _currentDesktopId = id;
             _desktopEnterTime = now;
             _confirmedDesktopId = null; // new desktop not yet confirmed as "used"
+            _sortAfterDesktopSettlement = true;
         }
 
         // Confirm the current desktop as recently used only after it has been visited
         // for at least the threshold. A quick pass-through does not enter the MRU.
         bool confirmed = false;
-        if (_settings.AutoSortEnabled
+        if (_settings.ResolveAutoSortMode() == DesktopAutoSortMode.TimeBased
             && _confirmedDesktopId != id
             && (now - _desktopEnterTime).TotalSeconds >= _settings.MruThresholdSeconds)
         {
@@ -567,26 +596,69 @@ internal sealed class TrayApplication : Form
             confirmed = true;
         }
 
-        if (_settings.AutoSortEnabled)
+        // A switch may still be in the shell animation. Its one sort is
+        // released by the shared settled signal below, not by this timer.
+        if (confirmed && !_sortAfterDesktopSettlement) ScheduleSort();
+        if (switched) ShowDesktopOrder();
+    }
+
+    private void OnSharedDesktopChanged(Guid desktopId)
+    {
+        _autoPin.ObserveDesktopChange(desktopId);
+        _snapWorkspaceService.ObserveDesktopChange(desktopId);
+        TrackDesktopUsage(desktopId);
+    }
+
+    private void OnSharedDesktopSettled(Guid desktopId)
+    {
+        _snapWorkspaceService.ObserveDesktopSettledWithoutAutoPin(desktopId);
+        // A foreground reconciliation can already have observed the new
+        // desktop, so AutoPin may legitimately have no later stable-observation
+        // event for this switch. The shared settled signal is the normal
+        // Auto-sort release; AutoPin's event is only the deferred path below.
+        CompleteDesktopTransitionForAutoSort(desktopId);
+    }
+
+    private void OnAutoPinDesktopSettled(Guid desktopId)
+    {
+        CompleteDesktopTransitionForAutoSort(desktopId);
+    }
+
+    private void CompleteDesktopTransitionForAutoSort(Guid desktopId)
+    {
+        if (_currentDesktopId != desktopId || !_sortAfterDesktopSettlement) return;
+        if (_autoPin.IsSuspended || _autoPin.IsTransitioning) return;
+        _sortAfterDesktopSettlement = false;
+        if (_settings.ResolveAutoSortMode() == DesktopAutoSortMode.TimeBased)
+            ScheduleSort();
+    }
+
+    private void UpdateDesktopUsageMonitoring()
+    {
+        if (_settings.ResolveAutoSortMode() == DesktopAutoSortMode.TimeBased)
+            _desktopOrderTimer.Start();
+        else
+            _desktopOrderTimer.Stop();
+    }
+
+    private void PostToUi(Action action)
+    {
+        if (IsDisposed || Disposing || !IsHandleCreated) return;
+        if (InvokeRequired)
         {
-            if (switched || confirmed)
-            {
-                ScheduleSort();
-            }
+            BeginInvoke(action);
+            return;
         }
-        else if (switched)
-        {
-            ShowDesktopOrder();
-        }
+        action();
     }
 
     /// <summary>
-    /// Defers sorting by 600ms so it runs after the desktop switch animation settles,
-    /// avoiding a race between MoveDesktop and the in-flight switch.
+    /// Runs only after the shared desktop-settlement result. The short delay lets
+    /// the final foreground event finish without polling/retrying during a switch.
     /// </summary>
     private void ScheduleSort()
     {
-        _sortTimer ??= new System.Windows.Forms.Timer { Interval = 600 };
+        _sortTimer ??= new System.Windows.Forms.Timer { Interval = 100 };
         _sortTimer.Tick -= OnSortTimerTick;
         _sortTimer.Tick += OnSortTimerTick;
         _sortTimer.Stop();
@@ -607,10 +679,10 @@ internal sealed class TrayApplication : Form
     /// </summary>
     private void SortDesktops()
     {
-        if (!_settings.AutoSortEnabled) return;
-        if (_autoPin.IsSuspended || _autoPin.IsTransitioning || DateTime.UtcNow < _sortFreezeUntil)
+        if (_settings.ResolveAutoSortMode() == DesktopAutoSortMode.Off) return;
+        if (_autoPin.IsSuspended || _autoPin.IsTransitioning)
         {
-            ScheduleSort();
+            Trace.WriteLine("TrayApplication: skipped sort because desktop is not settled.");
             return;
         }
 
@@ -715,11 +787,15 @@ internal sealed class TrayApplication : Form
         ]);
         menu.Items.Add(_autoPinModeItem);
 
-        _autoSortItem = new ToolStripMenuItem("Auto-sort Desktops by Recent Use")
-        {
-            Checked = _settings.AutoSortEnabled,
-        };
-        _autoSortItem.Click += (_, _) => ToggleAutoSort();
+        _autoSortItem = new ToolStripMenuItem("Auto-sort");
+        _autoSortOffItem = new ToolStripMenuItem("Off");
+        _autoSortTimeItem = new ToolStripMenuItem("By stay time");
+        _autoSortOffItem.Click += (_, _) => SelectAutoSortMode(DesktopAutoSortMode.Off);
+        _autoSortTimeItem.Click += (_, _) => SelectAutoSortMode(DesktopAutoSortMode.TimeBased);
+        _autoSortItem.DropDownItems.AddRange([
+            _autoSortOffItem,
+            _autoSortTimeItem,
+        ]);
         menu.Items.Add(_autoSortItem);
 
         menu.Opening += (_, _) => UpdateAutoPinMenuItems();
@@ -770,6 +846,8 @@ internal sealed class TrayApplication : Form
                 "Settings could not be saved. Your changes will apply for this session but won't persist after restart.",
                 "Save Failed", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
+        UpdateDesktopUsageMonitoring();
+        UpdateAutoSortMenuItem();
 
         // Re-register hotkeys with the new configuration
         NativeMethods.UnregisterHotKey(Handle, HOTKEY_ID);
@@ -1119,6 +1197,10 @@ internal sealed class TrayApplication : Form
         NativeMethods.UnregisterHotKey(Handle, HOTKEY_AUTOPIN_ID);
         _mouseHook.Dispose();
         _monitor.Dispose();
+        _desktopTransitions.DesktopChanged -= OnSharedDesktopChanged;
+        _desktopTransitions.DesktopSettled -= OnSharedDesktopSettled;
+        _autoPin.StableDesktopObservationApplied -= OnAutoPinDesktopSettled;
+        _desktopTransitions.Dispose();
         _snapWorkspaceService.Dispose();
         _autoPin.Dispose();
         _vds.Dispose();

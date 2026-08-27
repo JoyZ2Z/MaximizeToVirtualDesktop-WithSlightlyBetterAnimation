@@ -76,6 +76,30 @@ internal sealed class AppSettings
     /// </summary>
     public bool AutoSortEnabled { get; set; } = false;
 
+    /// <summary>
+    /// Selected Auto-sort policy. Null is a legacy settings file and is resolved
+    /// from <see cref="AutoSortEnabled"/>.
+    /// </summary>
+    public DesktopAutoSortMode? AutoSortMode { get; set; }
+
+    public DesktopAutoSortMode ResolveAutoSortMode()
+    {
+        // Version 2 used to mean "confirmed intent". That experimental mode
+        // has been removed; preserve enabled Auto-sort by migrating it to the
+        // reliable stay-time policy rather than silently disabling it.
+        if (AutoSortMode is not DesktopAutoSortMode.Off and not DesktopAutoSortMode.TimeBased)
+            return AutoSortEnabled ? DesktopAutoSortMode.TimeBased : DesktopAutoSortMode.Off;
+        return AutoSortMode ?? (AutoSortEnabled
+            ? DesktopAutoSortMode.TimeBased
+            : DesktopAutoSortMode.Off);
+    }
+
+    public void SetAutoSortMode(DesktopAutoSortMode mode)
+    {
+        AutoSortMode = mode;
+        AutoSortEnabled = mode != DesktopAutoSortMode.Off;
+    }
+
     /// <summary>Stable identity of Desktop 1, which Auto-Sort always keeps leftmost.</summary>
     public Guid? MainDesktopId { get; set; }
 
