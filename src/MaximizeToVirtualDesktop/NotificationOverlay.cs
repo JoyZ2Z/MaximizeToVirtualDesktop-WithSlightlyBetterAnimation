@@ -166,6 +166,26 @@ internal sealed class NotificationOverlay : Form
         _instance._hideTimer.Start();
     }
 
+    /// <summary>Immediately removes a stale overlay before a desktop is deleted.</summary>
+    public static void Dismiss()
+    {
+        if (_instance is null || _instance.IsDisposed) return;
+        _instance._hideTimer.Stop();
+        _instance._fadeTimer.Stop();
+        _instance.Hide();
+        _instance.Opacity = InitialOpacity;
+    }
+
+    /// <summary>Destroys the DWM surface so it cannot survive a deleted desktop.</summary>
+    public static void Reset()
+    {
+        if (_instance is null || _instance.IsDisposed) return;
+        _instance._hideTimer.Stop();
+        _instance._fadeTimer.Stop();
+        _instance.Dispose();
+        _instance = null;
+    }
+
     private void FitToContent(string title, string subtitle)
     {
         using var g = CreateGraphics();

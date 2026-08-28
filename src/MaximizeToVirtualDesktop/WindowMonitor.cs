@@ -20,6 +20,7 @@ internal sealed class WindowMonitor : IDisposable
     private IntPtr _locationChangeHook;
     private IntPtr _destroyHook;
     private IntPtr _hideHook;
+    private IntPtr _minimizeStartHook;
     private bool _disposed;
 
     // Must be stored as fields to prevent GC collection of the delegate
@@ -27,10 +28,12 @@ internal sealed class WindowMonitor : IDisposable
     private readonly NativeMethods.WinEventProc _destroyProc;
     private readonly NativeMethods.WinEventProc _hideProc;
     private readonly NativeMethods.WinEventProc _moveSizeEndProc;
+    private readonly NativeMethods.WinEventProc _minimizeStartProc;
     private IntPtr _moveSizeEndHook;
     // Track windows that have been maximized but need to wait for resize end
     private readonly HashSet<IntPtr> _pendingMaximize = new();
     private readonly HashSet<IntPtr> _pendingFullscreenExit = new();
+    private readonly HashSet<IntPtr> _pendingHiddenTrackedExit = new();
 
     public WindowMonitor(FullScreenManager manager, FullScreenTracker tracker,
         SnapWorkspaceService snapWorkspaceService, VirtualDesktopService vds,
@@ -47,6 +50,7 @@ internal sealed class WindowMonitor : IDisposable
         _destroyProc = OnDestroy;
         _hideProc = OnHide;
         _moveSizeEndProc = OnMoveSizeEnd;
+        _minimizeStartProc = OnMinimizeStart;
     }
 
     public void Start()
@@ -79,6 +83,12 @@ internal sealed class WindowMonitor : IDisposable
             NativeMethods.EVENT_OBJECT_HIDE,
             NativeMethods.EVENT_OBJECT_HIDE,
             IntPtr.Zero, _hideProc,
+            0, 0, NativeMethods.WINEVENT_OUTOFCONTEXT);
+
+        _minimizeStartHook = NativeMethods.SetWinEventHook(
+            NativeMethods.EVENT_SYSTEM_MINIMIZESTART,
+            NativeMethods.EVENT_SYSTEM_MINIMIZESTART,
+            IntPtr.Zero, _minimizeStartProc,
             0, 0, NativeMethods.WINEVENT_OUTOFCONTEXT);
 
         if (_locationChangeHook == IntPtr.Zero || _destroyHook == IntPtr.Zero)
@@ -118,7 +128,12 @@ internal sealed class WindowMonitor : IDisposable
                 // If left mouse button is down, user is dragging — let Windows handle the resize.
                 // OnMoveSizeEnd will fire after release and trigger restore.
                 bool isDragging = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_LBUTTON) & 0x8000) != 0;
-                if (isDragging) return;
+                if (isDragging)
+                {
+                    if (_settings.RestoreAnimationMode == RestoreAnimationMode.DesktopOne)
+                        MarshalToUiThread(() => _manager.Restore(hwnd));
+                    return;
+                }
 
                 Trace.WriteLine(
                     $"WindowMonitor: Tracked window {hwnd} left fullscreen; arbitration queued.");
@@ -281,24 +296,81 @@ internal sealed class WindowMonitor : IDisposable
         if (idObject != NativeMethods.OBJID_WINDOW || idChild != 0) return;
         if (!_tracker.IsTracked(hwnd)) return;
 
-        // A desktop switch also fires EVENT_OBJECT_HIDE for windows on other desktops,
-        // so a hide alone doesn't mean the window was closed. Verify the handle is
-        // actually gone shortly after before cleaning up. (Windows that are alive but
-        // invisible — tray apps, exclusive-fullscreen on another desktop — are left
-        // alone: IsWindowVisible cannot reliably distinguish them.)
-        Trace.WriteLine($"WindowMonitor: Tracked window {hwnd} hidden, verifying if closed.");
+        // A desktop switch also fires EVENT_OBJECT_HIDE. Reconcile on the UI
+        // thread so the source desktop can be captured before a short debounce.
+        // This lets a tray close release its managed desktop without a poll.
+        MarshalToUiThread(() => QueueTrackedWindowHideReconciliation(hwnd));
+    }
+
+    private void OnMinimizeStart(IntPtr hWinEventHook, uint eventType, IntPtr hwnd,
+        int idObject, int idChild, uint idEventThread, uint dwmsEventTime)
+    {
+        if (_settings.RestoreAnimationMode != RestoreAnimationMode.DesktopOne
+            || !_tracker.IsTracked(hwnd)) return;
+
+        // The explicit Desktop-1 mode switches before the shell begins its
+        // minimize animation, matching the selected Snap behavior.
+        MarshalToUiThread(() => _manager.Restore(hwnd, keepMinimized: true));
+    }
+
+    private void QueueTrackedWindowHideReconciliation(IntPtr hwnd)
+    {
+        if (_disposed || !_tracker.IsTracked(hwnd)
+            || _manager.IsMutationInFlight(hwnd)
+            || !_pendingHiddenTrackedExit.Add(hwnd))
+        {
+            return;
+        }
+
+        var sourceDesktopId = _vds.GetCurrentDesktopId();
+        if (!sourceDesktopId.HasValue || !_vds.IsWindowOnCurrentDesktop(hwnd))
+        {
+            _pendingHiddenTrackedExit.Remove(hwnd);
+            return;
+        }
+
+        Trace.WriteLine(
+            $"WindowMonitor: Tracked window {hwnd} hidden on active desktop; verifying tray exit.");
         _ = Task.Run(async () =>
         {
-            await Task.Delay(300);
-            MarshalToUiThread(() =>
-            {
-                if (_tracker.IsTracked(hwnd) && !NativeMethods.IsWindow(hwnd))
-                {
-                    Trace.WriteLine($"WindowMonitor: Tracked window {hwnd} confirmed closed after hide.");
-                    _manager.HandleWindowDestroyed(hwnd);
-                }
-            });
+            await Task.Delay(FullscreenExitPolicy.ArbitrationDelay);
+            MarshalToUiThread(() => ReconcileTrackedWindowHide(hwnd, sourceDesktopId.Value));
         });
+    }
+
+    private void ReconcileTrackedWindowHide(IntPtr hwnd, Guid sourceDesktopId)
+    {
+        _pendingHiddenTrackedExit.Remove(hwnd);
+        if (_disposed || !_tracker.IsTracked(hwnd) || _manager.IsMutationInFlight(hwnd))
+            return;
+
+        if (!NativeMethods.IsWindow(hwnd))
+        {
+            Trace.WriteLine($"WindowMonitor: Tracked window {hwnd} confirmed closed after hide.");
+            _manager.HandleWindowDestroyed(hwnd);
+            return;
+        }
+
+        // Reject desktop-switch hide notifications and a tray window that was
+        // restored before the debounce expired.
+        if (_vds.GetCurrentDesktopId() != sourceDesktopId
+            || !_vds.IsWindowOnCurrentDesktop(hwnd)
+            || NativeMethods.IsWindowVisible(hwnd))
+        {
+            return;
+        }
+
+        var decision = FullscreenExitPolicy.DecideAfterDelay(
+            WindowStateHelper.IsStillFullscreen(hwnd),
+            NativeMethods.IsIconic(hwnd),
+            SnapWorkspaceService.IsWindowArranged(hwnd),
+            isHidden: true);
+        if (decision == FullscreenExitDecision.RestoreMinimized)
+        {
+            Trace.WriteLine(
+                $"WindowMonitor: Tracked window {hwnd} remained hidden; restoring minimized and releasing desktop.");
+            _manager.Restore(hwnd, keepMinimized: true);
+        }
     }
 
     private void MarshalToUiThread(Action action)
@@ -340,8 +412,14 @@ internal sealed class WindowMonitor : IDisposable
             NativeMethods.UnhookWinEvent(_moveSizeEndHook);
             _moveSizeEndHook = IntPtr.Zero;
         }
+        if (_minimizeStartHook != IntPtr.Zero)
+        {
+            NativeMethods.UnhookWinEvent(_minimizeStartHook);
+            _minimizeStartHook = IntPtr.Zero;
+        }
 
         _pendingFullscreenExit.Clear();
+        _pendingHiddenTrackedExit.Clear();
 
         Trace.WriteLine("WindowMonitor: Disposed.");
     }

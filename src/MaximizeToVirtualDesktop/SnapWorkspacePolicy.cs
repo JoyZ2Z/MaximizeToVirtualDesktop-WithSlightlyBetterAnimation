@@ -33,6 +33,31 @@ internal sealed record CompletedSnapLayout(
 
 internal static class SnapWorkspacePolicy
 {
+    /// <summary>
+    /// A minimized or hidden member no longer contributes to the user's visible
+    /// Snap workspace. This also covers applications that turn a close command
+    /// into a tray hide instead of destroying their top-level window.
+    /// </summary>
+    public static bool ShouldDetachUnavailableMember(
+        bool isAlive, bool isVisible, bool isMinimized) =>
+        !isAlive || !isVisible || isMinimized;
+
+    /// <summary>
+    /// A member moved to another virtual desktop has left this workspace even
+    /// when that workspace is no longer the active desktop.
+    /// </summary>
+    public static bool ShouldDetachAfterRecheck(
+        bool isAlive, bool isOnWorkspaceDesktop, bool isVisible, bool isMinimized) =>
+        !isOnWorkspaceDesktop
+        || ShouldDetachUnavailableMember(isAlive, isVisible, isMinimized);
+
+    /// <summary>
+    /// Virtual-desktop removal is unsafe while the shell service cannot report
+    /// a current desktop. Callers must defer cleanup until it is available.
+    /// </summary>
+    public static bool CanRemoveEmptyWorkspace(bool hasCurrentDesktop) =>
+        hasCurrentDesktop;
+
     public static bool ShouldObserveNewLayout(
         bool isDirty, bool hasExistingSnapWorkspace, bool isFullscreenDesktop)
     {

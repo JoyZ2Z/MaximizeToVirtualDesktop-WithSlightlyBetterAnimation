@@ -42,6 +42,9 @@ internal sealed class TrayApplication : Form
     private ToolStripMenuItem _autoSortItem = null!;
     private ToolStripMenuItem _autoSortOffItem = null!;
     private ToolStripMenuItem _autoSortTimeItem = null!;
+    private ToolStripMenuItem _restoreAnimationItem = null!;
+    private ToolStripMenuItem _managedDesktopAnimationItem = null!;
+    private ToolStripMenuItem _desktopOneAnimationItem = null!;
     private readonly List<Guid> _desktopMru = new();
     private Guid? _mainDesktopId;
     private Guid? _currentDesktopId;
@@ -89,7 +92,8 @@ internal sealed class TrayApplication : Form
         _autoPin.StableDesktopObservationApplied += OnAutoPinDesktopSettled;
         _manager = new FullScreenManager(_vds, _tracker, _settings, this, _autoPin);
         _snapWorkspaceService = new SnapWorkspaceService(
-            _vds, _tracker, _snapTracker, _autoPin, this, () => _mainDesktopId);
+            _vds, _tracker, _snapTracker, _autoPin, _settings, this, () => _mainDesktopId);
+        _snapWorkspaceService.WorkspaceRemovalSwitchedDesktop += ShowDesktopOrderAfterWorkspaceRemoval;
         _monitor = new WindowMonitor(
             _manager, _tracker, _snapWorkspaceService, _vds, this, _settings);
         _mouseHook = new MaximizeButtonHook(_manager, this, _settings);
@@ -513,6 +517,25 @@ internal sealed class TrayApplication : Form
         Trace.WriteLine($"TrayApplication: Auto-sort mode selected: {mode}.");
     }
 
+    private void SelectRestoreAnimationMode(RestoreAnimationMode mode)
+    {
+        _settings.RestoreAnimationMode = mode;
+        _settings.Save();
+        UpdateRestoreAnimationMenuItems();
+        var description = mode == RestoreAnimationMode.ManagedDesktop
+            ? "Finish on the virtual desktop, then return to Desktop 1"
+            : "Return to Desktop 1 before Windows plays the animation";
+        NotificationOverlay.ShowNotification("Exit animation", description);
+    }
+
+    private void UpdateRestoreAnimationMenuItems()
+    {
+        _managedDesktopAnimationItem.Checked =
+            _settings.RestoreAnimationMode == RestoreAnimationMode.ManagedDesktop;
+        _desktopOneAnimationItem.Checked =
+            _settings.RestoreAnimationMode == RestoreAnimationMode.DesktopOne;
+    }
+
     private void UpdateAutoSortMenuItem()
     {
         var mode = _settings.ResolveAutoSortMode();
@@ -611,7 +634,7 @@ internal sealed class TrayApplication : Form
 
     private void OnSharedDesktopSettled(Guid desktopId)
     {
-        _snapWorkspaceService.ObserveDesktopSettledWithoutAutoPin(desktopId);
+        _snapWorkspaceService.ObserveDesktopSettled(desktopId);
         // A foreground reconciliation can already have observed the new
         // desktop, so AutoPin may legitimately have no later stable-observation
         // event for this switch. The shared settled signal is the normal
@@ -622,6 +645,23 @@ internal sealed class TrayApplication : Form
     private void OnAutoPinDesktopSettled(Guid desktopId)
     {
         CompleteDesktopTransitionForAutoSort(desktopId);
+    }
+
+    private void ShowDesktopOrderAfterWorkspaceRemoval()
+    {
+        // The workspace switch is an application-owned transition rather than
+        // a normal shell gesture. Clear a fading overlay from the deleted
+        // desktop and show one fresh instance only after Desktop 1 is stable.
+        NotificationOverlay.Reset();
+        var timer = new System.Windows.Forms.Timer { Interval = 350 };
+        timer.Tick += (_, _) =>
+        {
+            timer.Stop();
+            timer.Dispose();
+            if (_mainDesktopId != _vds.GetCurrentDesktopId()) return;
+            ShowDesktopOrder();
+        };
+        timer.Start();
     }
 
     private void CompleteDesktopTransitionForAutoSort(Guid desktopId)
@@ -798,8 +838,25 @@ internal sealed class TrayApplication : Form
         ]);
         menu.Items.Add(_autoSortItem);
 
-        menu.Opening += (_, _) => UpdateAutoPinMenuItems();
-        menu.Opening += (_, _) => UpdateAutoSortMenuItem();
+        _restoreAnimationItem = new ToolStripMenuItem("Exit animation");
+        _managedDesktopAnimationItem = new ToolStripMenuItem("Finish on virtual desktop");
+        _desktopOneAnimationItem = new ToolStripMenuItem("Return to Desktop 1 first");
+        _managedDesktopAnimationItem.Click += (_, _) =>
+            SelectRestoreAnimationMode(RestoreAnimationMode.ManagedDesktop);
+        _desktopOneAnimationItem.Click += (_, _) =>
+            SelectRestoreAnimationMode(RestoreAnimationMode.DesktopOne);
+        _restoreAnimationItem.DropDownItems.AddRange([
+            _managedDesktopAnimationItem,
+            _desktopOneAnimationItem,
+        ]);
+        menu.Items.Add(_restoreAnimationItem);
+
+        menu.Opening += (_, _) =>
+        {
+            UpdateAutoPinMenuItems();
+            UpdateAutoSortMenuItem();
+            UpdateRestoreAnimationMenuItems();
+        };
 
         menu.Items.Add(new ToolStripSeparator());
 
@@ -1201,6 +1258,7 @@ internal sealed class TrayApplication : Form
         _desktopTransitions.DesktopSettled -= OnSharedDesktopSettled;
         _autoPin.StableDesktopObservationApplied -= OnAutoPinDesktopSettled;
         _desktopTransitions.Dispose();
+        _snapWorkspaceService.WorkspaceRemovalSwitchedDesktop -= ShowDesktopOrderAfterWorkspaceRemoval;
         _snapWorkspaceService.Dispose();
         _autoPin.Dispose();
         _vds.Dispose();

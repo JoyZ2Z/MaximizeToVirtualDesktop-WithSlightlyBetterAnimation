@@ -120,6 +120,10 @@ internal sealed class AppSettings
     /// </summary>
     public bool ShowSwitchPopup { get; set; } = true;
 
+    /// <summary>Controls whether exit animations occur before or after returning to Desktop 1.</summary>
+    public RestoreAnimationMode RestoreAnimationMode { get; set; } =
+        MaximizeToVirtualDesktop.RestoreAnimationMode.ManagedDesktop;
+
     public static AppSettings Load()
     {
         try

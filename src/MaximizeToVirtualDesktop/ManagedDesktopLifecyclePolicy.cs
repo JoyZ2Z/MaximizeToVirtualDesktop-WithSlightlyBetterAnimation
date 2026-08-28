@@ -25,8 +25,12 @@ internal static class FullscreenExitPolicy
     public static TimeSpan ArbitrationDelay => TimeSpan.FromMilliseconds(300);
 
     public static FullscreenExitDecision DecideAfterDelay(
-        bool isStillFullscreen, bool isMinimized, bool isArranged)
+        bool isStillFullscreen, bool isMinimized, bool isArranged, bool isHidden = false)
     {
+        // Tray applications often remain maximized while hiding their top-level
+        // window. Treat that state like a minimized exit so the managed desktop
+        // is released without forcing the application visible again.
+        if (isHidden) return FullscreenExitDecision.RestoreMinimized;
         if (isStillFullscreen) return FullscreenExitDecision.None;
         if (isMinimized) return FullscreenExitDecision.RestoreMinimized;
         return isArranged

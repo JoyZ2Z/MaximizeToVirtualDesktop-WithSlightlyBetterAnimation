@@ -300,6 +300,8 @@ internal static partial class NativeMethods
 
     internal const uint WINEVENT_OUTOFCONTEXT = 0x0000;
     internal const uint EVENT_SYSTEM_FOREGROUND = 0x0003;
+    internal const uint EVENT_SYSTEM_MOVESIZESTART = 0x000A;
+    internal const uint EVENT_SYSTEM_MINIMIZESTART = 0x0016;
     internal const uint EVENT_SYSTEM_DESKTOPSWITCH = 0x001B;
     internal const uint EVENT_OBJECT_CREATE = 0x8000;
     internal const uint EVENT_OBJECT_SHOW = 0x8002;

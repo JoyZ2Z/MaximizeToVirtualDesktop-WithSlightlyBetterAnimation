@@ -320,6 +320,12 @@ internal sealed class FullScreenManager
         var origDesktop = _vds.FindDesktop(entry.OriginalDesktopId);
         try
         {
+            // In managed-desktop mode the user sees the restore/minimize on
+            // the virtual desktop first. Desktop-One mode retains the legacy
+            // order and plays the state transition after the return switch.
+            if (_settings.RestoreAnimationMode == RestoreAnimationMode.ManagedDesktop)
+                RestoreWindowPresentation(hwnd, entry, keepMinimized);
+
             if (WindowStateHelper.IsUwpWindow(hwnd))
             {
                 // UWP: no Pin/Unpin (see MaximizeToDesktop). Move then switch.
@@ -339,17 +345,8 @@ internal sealed class FullScreenManager
                 _vds.UnpinWindow(hwnd);
             }
 
-            if (!keepMinimized && NativeMethods.IsWindow(hwnd))
-            {
-                var cur = NativeMethods.WINDOWPLACEMENT.Default;
-                if (NativeMethods.GetWindowPlacement(hwnd, ref cur)
-                    && cur.showCmd == NativeMethods.SW_MAXIMIZE)
-                {
-                    var placement = entry.OriginalPlacement;
-                    NativeMethods.SetWindowPlacement(hwnd, ref placement);
-                }
-                NativeMethods.ShowWindow(hwnd, (int)NativeMethods.SW_SHOWNORMAL);
-            }
+            if (_settings.RestoreAnimationMode == RestoreAnimationMode.DesktopOne)
+                RestoreWindowPresentation(hwnd, entry, keepMinimized);
         }
         finally
         {
@@ -378,6 +375,19 @@ internal sealed class FullScreenManager
             NotificationOverlay.ShowNotification("← Restored", entry.ProcessName ?? "", hwnd);
         }
         Trace.WriteLine($"FullScreenManager: Restored window to original desktop.");
+    }
+
+    private static void RestoreWindowPresentation(IntPtr hwnd, TrackingEntry entry, bool keepMinimized)
+    {
+        if (keepMinimized || !NativeMethods.IsWindow(hwnd)) return;
+        var current = NativeMethods.WINDOWPLACEMENT.Default;
+        if (NativeMethods.GetWindowPlacement(hwnd, ref current)
+            && current.showCmd == NativeMethods.SW_MAXIMIZE)
+        {
+            var original = entry.OriginalPlacement;
+            NativeMethods.SetWindowPlacement(hwnd, ref original);
+        }
+        NativeMethods.ShowWindow(hwnd, (int)NativeMethods.SW_SHOWNORMAL);
     }
 
     /// <summary>

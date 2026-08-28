@@ -10,29 +10,35 @@ namespace MaximizeToVirtualDesktop;
 /// </summary>
 internal sealed class SnapWorkspaceService : IDisposable
 {
-    private const int ProbeIntervalMs = 500;
+    private const int IdleProbeIntervalMs = 500;
+    // This probe never enumerates top-level windows.  It only verifies the
+    // members of already-created Snap workspaces, so it can be responsive
+    // without reintroducing a global polling cost.
+    private const int ActiveWorkspaceProbeIntervalMs = 250;
     private const int StableLayoutMs = 300;
     private const int WorkspaceHealthProbeMs = 3000;
     // WinEvent hooks wake the service for real work. This is only a recovery
     // heartbeat for a missed desktop-switch notification.
     private const int IdleDesktopVerificationMs = 3000;
     private const int GeometryTolerancePixels = 4;
-    private const int EmptyWorkspaceGraceMs = 800;
 
     private readonly VirtualDesktopService _vds;
     private readonly FullScreenTracker _fullScreenTracker;
     private readonly SnapWorkspaceTracker _tracker;
     private readonly AutoPinService _autoPin;
+    private readonly AppSettings _settings;
     private readonly Control _syncControl;
     private readonly Func<Guid?> _mainDesktopProvider;
     private readonly System.Windows.Forms.Timer _probeTimer;
     private readonly NativeMethods.WinEventProc _windowEventProc;
     private readonly Dictionary<string, SnapLayoutStabilityGate> _layoutGates = new();
     private readonly Dictionary<nint, DateTime> _geometryMismatchSince = new();
-    private readonly Dictionary<Guid, DateTime> _emptyWorkspaceSince = new();
     private IntPtr _locationHook;
+    private IntPtr _moveSizeStartHook;
     private IntPtr _moveSizeHook;
     private IntPtr _destroyHook;
+    private IntPtr _hideHook;
+    private IntPtr _minimizeStartHook;
     private bool _dirty = true;
     private int _geometryDirtyNotification;
     // 1 = geometry is still moving; 2 = a move/resize completed.
@@ -48,12 +54,22 @@ internal sealed class SnapWorkspaceService : IDisposable
     private DateTime _nextWorkspaceHealthProbe;
     private DateTime _nextIdleDesktopVerification;
     private DateTime _layoutObservationAfter;
+    private readonly HashSet<nint> _pendingMemberAvailabilityChecks = [];
+    private readonly HashSet<nint> _pendingNativeLayoutCandidates = [];
+    // Windows clears its native-arranged bit at the beginning of a drag, not
+    // when the user releases the caption. Keep that transitional state local
+    // to tracked Snap members until MOVESIZEEND provides the real boundary.
+    private readonly HashSet<nint> _membersInMoveSize = [];
+
+    /// <summary>Raised after workspace cleanup switches the user to Desktop 1.</summary>
+    public event Action? WorkspaceRemovalSwitchedDesktop;
 
     public SnapWorkspaceService(
         VirtualDesktopService vds,
         FullScreenTracker fullScreenTracker,
         SnapWorkspaceTracker tracker,
         AutoPinService autoPin,
+        AppSettings settings,
         Control syncControl,
         Func<Guid?> mainDesktopProvider)
     {
@@ -61,10 +77,11 @@ internal sealed class SnapWorkspaceService : IDisposable
         _fullScreenTracker = fullScreenTracker;
         _tracker = tracker;
         _autoPin = autoPin;
+        _settings = settings;
         _syncControl = syncControl;
         _mainDesktopProvider = mainDesktopProvider;
         _windowEventProc = OnWindowEvent;
-        _probeTimer = new System.Windows.Forms.Timer { Interval = ProbeIntervalMs };
+        _probeTimer = new System.Windows.Forms.Timer { Interval = IdleProbeIntervalMs };
         _probeTimer.Tick += (_, _) => Probe();
         _autoPin.StableDesktopObservationApplied += OnAutoPinDesktopSettled;
     }
@@ -76,6 +93,10 @@ internal sealed class SnapWorkspaceService : IDisposable
             NativeMethods.EVENT_OBJECT_LOCATIONCHANGE,
             NativeMethods.EVENT_OBJECT_LOCATIONCHANGE,
             IntPtr.Zero, _windowEventProc, 0, 0, NativeMethods.WINEVENT_OUTOFCONTEXT);
+        _moveSizeStartHook = NativeMethods.SetWinEventHook(
+            NativeMethods.EVENT_SYSTEM_MOVESIZESTART,
+            NativeMethods.EVENT_SYSTEM_MOVESIZESTART,
+            IntPtr.Zero, _windowEventProc, 0, 0, NativeMethods.WINEVENT_OUTOFCONTEXT);
         _moveSizeHook = NativeMethods.SetWinEventHook(
             NativeMethods.EVENT_SYSTEM_MOVESIZEEND,
             NativeMethods.EVENT_SYSTEM_MOVESIZEEND,
@@ -83,6 +104,14 @@ internal sealed class SnapWorkspaceService : IDisposable
         _destroyHook = NativeMethods.SetWinEventHook(
             NativeMethods.EVENT_OBJECT_DESTROY,
             NativeMethods.EVENT_OBJECT_DESTROY,
+            IntPtr.Zero, _windowEventProc, 0, 0, NativeMethods.WINEVENT_OUTOFCONTEXT);
+        _hideHook = NativeMethods.SetWinEventHook(
+            NativeMethods.EVENT_OBJECT_HIDE,
+            NativeMethods.EVENT_OBJECT_HIDE,
+            IntPtr.Zero, _windowEventProc, 0, 0, NativeMethods.WINEVENT_OUTOFCONTEXT);
+        _minimizeStartHook = NativeMethods.SetWinEventHook(
+            NativeMethods.EVENT_SYSTEM_MINIMIZESTART,
+            NativeMethods.EVENT_SYSTEM_MINIMIZESTART,
             IntPtr.Zero, _windowEventProc, 0, 0, NativeMethods.WINEVENT_OUTOFCONTEXT);
         _probeTimer.Start();
         Trace.WriteLine("SnapWorkspaceService: started.");
@@ -92,12 +121,30 @@ internal sealed class SnapWorkspaceService : IDisposable
         int objectId, int childId, uint eventThreadId, uint eventTime)
     {
         if (_disposed) return;
+        if (eventType == NativeMethods.EVENT_SYSTEM_MOVESIZESTART)
+        {
+            PostToUi(() => BeginMemberMove(hwnd));
+            return;
+        }
+        if (eventType == NativeMethods.EVENT_SYSTEM_MINIMIZESTART)
+        {
+            PostToUi(() =>
+            {
+                PrepareDesktopOneAnimation(hwnd, "minimize");
+                QueueMemberAvailabilityCheck(hwnd, "minimize");
+            });
+            return;
+        }
         if (eventType != NativeMethods.EVENT_SYSTEM_MOVESIZEEND
             && (objectId != NativeMethods.OBJID_WINDOW || childId != 0)) return;
         if (eventType == NativeMethods.EVENT_SYSTEM_MOVESIZEEND)
         {
             // A completed drag/resize is the meaningful boundary at which a
             // window can join an existing native Snap workspace.
+            if (_tracker.IsAttachedMember(hwnd))
+                PostToUi(() => FinishMemberMove(hwnd));
+            if (IsWindowArranged(hwnd))
+                PostToUi(() => QueueNativeLayoutCandidate(hwnd));
             Interlocked.Exchange(ref _readoptionRequested, 1);
             Interlocked.Exchange(ref _geometryDirtyNotification, 1);
             Interlocked.Exchange(ref _layoutObservationNotification, 2);
@@ -105,6 +152,13 @@ internal sealed class SnapWorkspaceService : IDisposable
         }
         if (eventType == NativeMethods.EVENT_OBJECT_LOCATIONCHANGE)
         {
+            // A Snap member can be maximized into a new MVD desktop. Its old
+            // workspace must then be reconciled even though it is no longer
+            // the current desktop.
+            if (_tracker.IsAttachedMember(hwnd))
+                PostToUi(() => QueueMemberAvailabilityCheck(hwnd, "location change"));
+            if (IsWindowArranged(hwnd))
+                PostToUi(() => QueueNativeLayoutCandidate(hwnd));
             // Dragging emits LOCATIONCHANGE continuously. Probe consumes this
             // flag at most twice per second on the UI thread.
             if (Volatile.Read(ref _geometryDirtyNotification) == 0)
@@ -122,7 +176,10 @@ internal sealed class SnapWorkspaceService : IDisposable
                 workspace.Detach(hwnd);
                 _geometryMismatchSince.Remove(hwnd);
                 if (workspace.IsEmpty) RemoveWorkspace(workspace);
+                return;
             }
+            if (eventType == NativeMethods.EVENT_OBJECT_HIDE)
+                QueueMemberAvailabilityCheck(hwnd, "hide");
         });
     }
 
@@ -145,9 +202,9 @@ internal sealed class SnapWorkspaceService : IDisposable
         foreach (var gate in _layoutGates.Values) gate.Reset();
     }
 
-    public void ObserveDesktopSettledWithoutAutoPin(Guid desktopId)
+    public void ObserveDesktopSettled(Guid desktopId)
     {
-        if (_disposed || _autoPin.Enabled) return;
+        if (_disposed) return;
         OnDesktopSettled(desktopId);
     }
 
@@ -163,9 +220,152 @@ internal sealed class SnapWorkspaceService : IDisposable
         Interlocked.Exchange(ref _readoptionRequested, 1);
     }
 
+    private void QueueMemberAvailabilityCheck(nint hwnd, string signal)
+    {
+        if (_disposed || !_pendingMemberAvailabilityChecks.Add(hwnd)) return;
+        var workspace = _tracker.GetByMember(hwnd);
+        if (workspace is null)
+        {
+            _pendingMemberAvailabilityChecks.Remove(hwnd);
+            return;
+        }
+        // These calls are already serialized onto the UI thread.  A Snap
+        // workspace must disappear as soon as its final member is no longer
+        // valid; delaying this leaves an orphan desktop behind.
+        ReconcileMemberAvailability(hwnd, workspace.TempDesktopId, signal);
+    }
+
+    private void ReconcileMemberAvailability(nint hwnd, Guid sourceDesktopId, string signal)
+    {
+        _pendingMemberAvailabilityChecks.Remove(hwnd);
+        if (_disposed) return;
+        var workspace = _tracker.GetByMember(hwnd);
+        if (workspace is null || workspace.TempDesktopId != sourceDesktopId) return;
+
+        // The window is still being dragged. Its arrangement and geometry are
+        // intentionally transient; defer workspace exit until MOVESIZEEND.
+        if (_membersInMoveSize.Contains(hwnd)) return;
+
+        var isAlive = NativeMethods.IsWindow(hwnd);
+        var isOnWorkspaceDesktop = isAlive && IsWindowOnDesktop(hwnd, sourceDesktopId);
+        var currentDesktopId = _vds.GetCurrentDesktopId();
+
+        // A desktop switch hides the old desktop's windows. If the member is
+        // still on that workspace but it is no longer current, this was only a
+        // switch notification, not a lifecycle change.
+        if (isOnWorkspaceDesktop && currentDesktopId != sourceDesktopId)
+        {
+            return;
+        }
+
+        if (!SnapWorkspacePolicy.ShouldDetachAfterRecheck(
+                isAlive,
+                isOnWorkspaceDesktop,
+                isAlive && NativeMethods.IsWindowVisible(hwnd),
+                isAlive && NativeMethods.IsIconic(hwnd)))
+        {
+            return;
+        }
+
+        Detach(workspace, hwnd, $"{signal} left visible Snap layout");
+        if (workspace.IsEmpty) RemoveWorkspace(workspace);
+    }
+
+    private void BeginMemberMove(nint hwnd)
+    {
+        if (_settings.RestoreAnimationMode == RestoreAnimationMode.DesktopOne)
+        {
+            PrepareDesktopOneAnimation(hwnd, "drag");
+            return;
+        }
+        if (_tracker.IsAttachedMember(hwnd)) _membersInMoveSize.Add(hwnd);
+    }
+
+    private void PrepareDesktopOneAnimation(nint hwnd, string interaction)
+    {
+        if (_settings.RestoreAnimationMode != RestoreAnimationMode.DesktopOne) return;
+        var workspace = _tracker.GetByMember(hwnd);
+        if (workspace is null || workspace.Members.Count != 1
+            || !IsWindowOnDesktop(hwnd, workspace.TempDesktopId)) return;
+
+        // This is the explicitly selected legacy-style behavior: return
+        // before Windows draws the final drag/minimize animation.
+        Detach(workspace, hwnd, $"{interaction} starts on Desktop 1");
+        if (workspace.IsEmpty) RemoveWorkspace(workspace);
+    }
+
+    private void FinishMemberMove(nint hwnd)
+    {
+        _membersInMoveSize.Remove(hwnd);
+        var workspace = _tracker.GetByMember(hwnd);
+        if (workspace is null || _vds.GetCurrentDesktopId() != workspace.TempDesktopId) return;
+
+        // This is the same stable interaction boundary used by the fullscreen
+        // lifecycle: decide only after the user has released the window.
+        ObserveWorkspaceMembers(workspace, shouldReadopt: true);
+    }
+
+    /// <summary>
+    /// Normal desktops use the same native-Snap trigger as a fullscreen-to-Snap
+    /// promotion: an arranged window event, followed by one short settle delay
+    /// and a complete native layout check. This deliberately does not poll or
+    /// infer Snap from arbitrary window geometry.
+    /// </summary>
+    private void QueueNativeLayoutCandidate(nint hwnd)
+    {
+        if (_disposed || _inFlight || !_pendingNativeLayoutCandidates.Add(hwnd)) return;
+        var sourceDesktopId = _vds.GetCurrentDesktopId();
+        if (!sourceDesktopId.HasValue || !_vds.IsWindowOnCurrentDesktop(hwnd))
+        {
+            _pendingNativeLayoutCandidates.Remove(hwnd);
+            return;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(FullscreenExitPolicy.ArbitrationDelay);
+            PostToUi(() => ReconcileNativeLayoutCandidate(hwnd, sourceDesktopId.Value));
+        });
+    }
+
+    private void ReconcileNativeLayoutCandidate(nint hwnd, Guid sourceDesktopId)
+    {
+        _pendingNativeLayoutCandidates.Remove(hwnd);
+        if (_disposed || _inFlight
+            || _vds.GetCurrentDesktopId() != sourceDesktopId
+            || _tracker.GetByDesktop(sourceDesktopId) is not null
+            || !NativeMethods.IsWindow(hwnd)
+            || !IsWindowArranged(hwnd)
+            || !IsWindowOnDesktop(hwnd, sourceDesktopId))
+        {
+            return;
+        }
+
+        var layout = SnapWorkspacePolicy.FindLayoutContainingWindow(
+            ObserveCompletedLayouts(sourceDesktopId), hwnd);
+        if (layout is null) return;
+
+        // A layout containing the existing fullscreen anchor is promoted by
+        // WindowMonitor's fullscreen-to-Snap path.  A layout formed only by
+        // other windows is independent and must create its own workspace.
+        var fullscreen = _fullScreenTracker.GetByDesktop(sourceDesktopId);
+        if (fullscreen is not null
+            && layout.Members.Any(member => member.Hwnd == fullscreen.Hwnd))
+        {
+            return;
+        }
+
+        Trace.WriteLine(
+            $"SnapWorkspaceService: completed native Snap layout on desktop "
+            + $"{sourceDesktopId}; creating workspace from candidate {hwnd}.");
+        CreateWorkspace(layout);
+    }
+
     private void Probe()
     {
         if (_disposed || _inFlight) return;
+        ReconcileMembersMovedAwayFromTrackedWorkspaces();
+        if (_inFlight) return;
         var geometryChanged = Interlocked.Exchange(ref _geometryDirtyNotification, 0) != 0;
         var layoutSignal = Interlocked.Exchange(ref _layoutObservationNotification, 0);
         var now = DateTime.UtcNow;
@@ -226,7 +426,7 @@ internal sealed class SnapWorkspaceService : IDisposable
             _nextWorkspaceHealthProbe = workspaceNow.AddMilliseconds(
                 _geometryMismatchSince.Count == 0
                     ? WorkspaceHealthProbeMs
-                    : ProbeIntervalMs);
+                    : ActiveWorkspaceProbeIntervalMs);
             return;
         }
 
@@ -273,6 +473,46 @@ internal sealed class SnapWorkspaceService : IDisposable
 
         if (stable is not null) CreateWorkspace(stable);
         _dirty = layouts.Count > 0;
+    }
+
+    /// <summary>
+    /// A member moved to a new MVD desktop does not reliably produce a usable
+    /// WinEvent on its old desktop. Check only members we already own; this is
+    /// deliberately not a global EnumWindows scan.
+    /// </summary>
+    private void ReconcileMembersMovedAwayFromTrackedWorkspaces()
+    {
+        var workspaces = _tracker.GetAll();
+        RefreshProbeInterval(workspaces.Count != 0);
+        foreach (var workspace in workspaces)
+        {
+            foreach (var member in workspace.Members.ToArray())
+            {
+                if (!IsSameLiveWindow(member))
+                {
+                    Detach(workspace, member.Hwnd, "destroyed or HWND reused");
+                    continue;
+                }
+
+                // The public virtual-desktop membership query is not reliable
+                // for a UWP frame on a non-current desktop. Its WinEvents are
+                // still handled above; do not make an incorrect remote claim.
+                if (WindowStateHelper.IsUwpWindow(member.Hwnd)) continue;
+                if (_vds.GetDesktopIdForWindow(member.Hwnd) != workspace.TempDesktopId)
+                    Detach(workspace, member.Hwnd, "moved to another desktop");
+            }
+
+            if (workspace.IsEmpty) RemoveWorkspace(workspace);
+            if (_inFlight) return;
+        }
+    }
+
+    private void RefreshProbeInterval(bool hasTrackedWorkspace)
+    {
+        var target = hasTrackedWorkspace
+            ? ActiveWorkspaceProbeIntervalMs
+            : IdleProbeIntervalMs;
+        if (_probeTimer.Interval != target) _probeTimer.Interval = target;
     }
 
     private List<CompletedSnapLayout> ObserveCompletedLayouts(Guid desktopId)
@@ -527,14 +767,19 @@ internal sealed class SnapWorkspaceService : IDisposable
                 }
             }
 
+            if (!_vds.SwitchToDesktop(desktop))
+                throw new InvalidOperationException("Could not switch to Snap workspace desktop.");
+
+            // Match the fullscreen transition precisely: keep each ordinary
+            // window pinned while switching, then move it into the already
+            // visible target desktop, then release the pin. Moving first
+            // exposes an empty target and produces a wallpaper flash.
             foreach (var member in layout.Members)
             {
                 if (!_vds.MoveWindowToDesktop(member.Hwnd, desktop))
                     throw new InvalidOperationException($"Could not move Snap member {member.Hwnd}.");
                 moved.Add(member);
             }
-            if (!_vds.SwitchToDesktop(desktop))
-                throw new InvalidOperationException("Could not switch to Snap workspace desktop.");
 
             foreach (var member in layout.Members)
             {
@@ -556,6 +801,7 @@ internal sealed class SnapWorkspaceService : IDisposable
                 Guid.NewGuid(), layout.SourceDesktopId, created.id.Value, desktop,
                 layout.MonitorId, layout.WorkArea, trackedMembers);
             _tracker.Track(workspace);
+            RefreshProbeInterval(hasTrackedWorkspace: true);
             foreach (var member in trackedMembers)
                 _autoPin.ExcludeManagedWorkspaceWindow(member.Hwnd);
             desktop = null; // ownership transferred to tracker
@@ -610,6 +856,17 @@ internal sealed class SnapWorkspaceService : IDisposable
                 continue;
             }
 
+            if (_membersInMoveSize.Contains(member.Hwnd)) continue;
+
+            if (SnapWorkspacePolicy.ShouldDetachUnavailableMember(
+                    isAlive: true,
+                    isVisible: NativeMethods.IsWindowVisible(member.Hwnd),
+                    isMinimized: NativeMethods.IsIconic(member.Hwnd)))
+            {
+                Detach(workspace, member.Hwnd, "hidden or minimized");
+                continue;
+            }
+
             if (member.UsesNativeArrangedState)
             {
                 if (IsWindowArranged(member.Hwnd))
@@ -619,13 +876,11 @@ internal sealed class SnapWorkspaceService : IDisposable
                         workspace.UpdateMember(member with { ExpectedFrame = frame });
                     continue;
                 }
-                if (!_geometryMismatchSince.TryGetValue(member.Hwnd, out var stateClearedAt))
-                {
-                    _geometryMismatchSince[member.Hwnd] = now;
-                    continue;
-                }
-                if (now - stateClearedAt >= TimeSpan.FromMilliseconds(StableLayoutMs))
-                    Detach(workspace, member.Hwnd, "native arranged state stably cleared");
+                // Native Snap state is the authoritative exit signal. Do not
+                // hold an arbitrary grace period after it clears: a member
+                // dragged out, restored, minimized, or closed must restore
+                // the workspace immediately.
+                Detach(workspace, member.Hwnd, "native arranged state cleared");
                 continue;
             }
 
@@ -644,25 +899,19 @@ internal sealed class SnapWorkspaceService : IDisposable
                 Detach(workspace, member.Hwnd, "stable geometry left committed zone");
         }
 
-        // ReadoptArrangedWindows enumerates every top-level window and makes a
-        // virtual-desktop COM query for each candidate.  Do that only after a
-        // completed native arrange operation (or while recovering an empty
-        // workspace), never for each intermediate drag geometry notification.
-        if (shouldReadopt || workspace.IsEmpty)
-            ReadoptArrangedWindows(workspace);
-        if (!workspace.IsEmpty)
+        // An empty workspace has no state worth preserving. Restore/remove it
+        // immediately, before any expensive re-adoption enumeration.
+        if (workspace.IsEmpty)
         {
-            _emptyWorkspaceSince.Remove(workspace.WorkspaceId);
+            RemoveWorkspace(workspace);
             return;
         }
 
-        if (!_emptyWorkspaceSince.TryGetValue(workspace.WorkspaceId, out var emptySince))
-        {
-            _emptyWorkspaceSince[workspace.WorkspaceId] = now;
-            return;
-        }
-        if (now - emptySince >= TimeSpan.FromMilliseconds(EmptyWorkspaceGraceMs))
-            RemoveWorkspace(workspace);
+        // Re-adoption enumerates top-level windows only after a completed
+        // native arrangement, never for intermediate drag notifications.
+        if (shouldReadopt)
+            ReadoptArrangedWindows(workspace);
+        if (workspace.IsEmpty) RemoveWorkspace(workspace);
     }
 
     private void ReadoptArrangedWindows(SnapWorkspaceEntry workspace)
@@ -730,6 +979,7 @@ internal sealed class SnapWorkspaceService : IDisposable
     {
         if (!workspace.Detach(hwnd)) return;
         _geometryMismatchSince.Remove(hwnd);
+        _membersInMoveSize.Remove(hwnd);
         Trace.WriteLine($"SnapWorkspaceService: detached {hwnd}: {reason}.");
         if (!workspace.IsEmpty) _autoPin.HandleWorkspaceMemberDetached(hwnd);
     }
@@ -749,26 +999,65 @@ internal sealed class SnapWorkspaceService : IDisposable
         try
         {
             var current = _vds.GetCurrentDesktopId();
-            if (current == workspace.TempDesktopId)
+            if (!SnapWorkspacePolicy.CanRemoveEmptyWorkspace(current.HasValue))
             {
-                var mainDesktop = _vds.FindDesktop(mainDesktopId.Value);
-                try
-                {
-                    if (mainDesktop is null || !_vds.SwitchToDesktop(mainDesktop)) return;
-                }
-                finally
-                {
-                    if (mainDesktop is not null) Marshal.ReleaseComObject(mainDesktop);
-                }
+                Trace.WriteLine(
+                    "SnapWorkspaceService: deferred workspace removal; "
+                    + "virtual desktop service has no current desktop.");
+                return;
+            }
+            // Participants retain the last known members even after they have
+            // been detached from Snap tracking. Keep only windows that really
+            // remain on this temporary desktop; a member already moved to
+            // another MVD desktop must never be pulled back to Desktop 1.
+            var returningWindows = workspace.Participants
+                .Where(member => NativeMethods.IsWindow(member.Hwnd)
+                    && IsWindowOnDesktop(member.Hwnd, workspace.TempDesktopId))
+                .Select(member => member.Hwnd)
+                .ToArray();
+            var pinnedForReturn = new List<nint>();
+            foreach (var hwnd in returningWindows)
+            {
+                if (WindowStateHelper.IsUwpWindow(hwnd)) continue;
+                if (_vds.PinWindow(hwnd)) pinnedForReturn.Add(hwnd);
             }
 
-            if (!_vds.RemoveDesktop(workspace.TempDesktop, mainDesktopId.Value)) return;
-            if (_tracker.Remove(workspace.WorkspaceId) is not null)
-                Marshal.ReleaseComObject(workspace.TempDesktop);
-            _emptyWorkspaceSince.Remove(workspace.WorkspaceId);
-            _autoPin.HandleWorkspaceRemoved(
-                workspace.Participants, mainDesktopId.Value);
-            Trace.WriteLine($"SnapWorkspaceService: removed workspace {workspace.WorkspaceId}.");
+            var switchedToMain = false;
+            IVirtualDesktop? mainDesktop = null;
+            try
+            {
+                if (current == workspace.TempDesktopId || returningWindows.Length != 0)
+                    mainDesktop = _vds.FindDesktop(mainDesktopId.Value);
+
+                if (current == workspace.TempDesktopId)
+                {
+                    if (mainDesktop is null || !_vds.SwitchToDesktop(mainDesktop)) return;
+                    switchedToMain = true;
+                }
+
+                // Mirror FullScreenManager's visual transition: pin while
+                // changing desktops, move into the visible destination, then
+                // release the pin. This prevents an empty Desktop 1 frame.
+                if (mainDesktop is not null)
+                {
+                    foreach (var hwnd in returningWindows)
+                        _vds.MoveWindowToDesktop(hwnd, mainDesktop);
+                }
+                foreach (var hwnd in pinnedForReturn) _vds.UnpinWindow(hwnd);
+
+                if (!_vds.RemoveDesktop(workspace.TempDesktop, mainDesktopId.Value)) return;
+                if (_tracker.Remove(workspace.WorkspaceId) is not null)
+                    Marshal.ReleaseComObject(workspace.TempDesktop);
+                RefreshProbeInterval(_tracker.GetAll().Count != 0);
+                _autoPin.HandleWorkspaceRemoved(
+                    workspace.Participants, mainDesktopId.Value);
+                Trace.WriteLine($"SnapWorkspaceService: removed workspace {workspace.WorkspaceId}.");
+                if (switchedToMain) WorkspaceRemovalSwitchedDesktop?.Invoke();
+            }
+            finally
+            {
+                if (mainDesktop is not null) Marshal.ReleaseComObject(mainDesktop);
+            }
         }
         finally
         {
@@ -837,9 +1126,12 @@ internal sealed class SnapWorkspaceService : IDisposable
         _probeTimer.Stop();
         _probeTimer.Dispose();
         foreach (var hook in new[]
-                 { _locationHook, _moveSizeHook, _destroyHook })
+                 { _locationHook, _moveSizeStartHook, _moveSizeHook, _destroyHook, _hideHook, _minimizeStartHook })
             if (hook != IntPtr.Zero) NativeMethods.UnhookWinEvent(hook);
         _autoPin.StableDesktopObservationApplied -= OnAutoPinDesktopSettled;
-        _locationHook = _moveSizeHook = _destroyHook = IntPtr.Zero;
+        _locationHook = _moveSizeStartHook = _moveSizeHook = _destroyHook = _hideHook = _minimizeStartHook = IntPtr.Zero;
+        _pendingMemberAvailabilityChecks.Clear();
+        _pendingNativeLayoutCandidates.Clear();
+        _membersInMoveSize.Clear();
     }
 }
